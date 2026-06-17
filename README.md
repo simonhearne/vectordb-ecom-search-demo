@@ -93,9 +93,17 @@ npx wrangler pages secret put ZILLIZ_TOKEN
 Build and deploy:
 
 ```bash
-npm run build    # vite build -> dist/
-npm run deploy   # build + wrangler pages deploy dist
+npm run deploy        # build + deploy to a preview (named after the current git branch)
+npm run deploy:prod   # build + deploy to production (vdb-ecom.pages.dev)
 ```
+
+`npm run deploy` creates a **preview** deployment at `<branch>.vdb-ecom.pages.dev`;
+`npm run deploy:prod` (`wrangler pages deploy dist --branch main`) publishes to the production
+URL `vdb-ecom.pages.dev`.
+
+> Secrets are scoped per environment. `wrangler pages secret put NAME` targets **production**;
+> add `--environment preview` to set them for preview deployments. Secret changes only take
+> effect on the **next** deployment, so set secrets first, then deploy.
 
 The Workers AI `[ai]` binding is declared in `wrangler.toml` and applies automatically. The
 project name (`vdb-ecom`) comes from `wrangler.toml`; pass `--project-name` to override.

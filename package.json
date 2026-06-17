@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "build:facets": "node scripts/build-facets.mjs",
     "preview": "npm run build && wrangler pages dev dist",
-    "deploy": "npm run build && wrangler pages deploy dist"
+    "deploy": "npm run build && wrangler pages deploy dist",
+    "deploy:prod": "npm run build && wrangler pages deploy dist --branch main"
   },
   "dependencies": {
     "react": "^19.0.0",
