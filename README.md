@@ -76,19 +76,29 @@ pure styling work.
 
 ## Build & deploy
 
+First, create the Pages project **once** — secrets and deploys both require it to exist:
+
 ```bash
-npm run build    # vite build -> dist/
-npm run deploy   # build + wrangler pages deploy dist
+npx wrangler pages project create vdb-ecom --production-branch main
 ```
 
-Set production secrets on the Pages project (once):
+Then set the production secrets (the project must already exist, or this errors with
+`Project "vdb-ecom" does not exist`):
 
 ```bash
 npx wrangler pages secret put ZILLIZ_ENDPOINT
 npx wrangler pages secret put ZILLIZ_TOKEN
 ```
 
-The Workers AI `[ai]` binding is declared in `wrangler.toml` and applies automatically.
+Build and deploy:
+
+```bash
+npm run build    # vite build -> dist/
+npm run deploy   # build + wrangler pages deploy dist
+```
+
+The Workers AI `[ai]` binding is declared in `wrangler.toml` and applies automatically. The
+project name (`vdb-ecom`) comes from `wrangler.toml`; pass `--project-name` to override.
 Git push-to-deploy also works once the Pages project is connected to the repo (set the same
 two secrets in the dashboard).
 
