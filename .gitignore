@@ -18,9 +18,10 @@ dist/
 *.log
 .DS_Store
 
-# playwright / screenshots
+# playwright / screenshots (stray screenshots stay out; committed docs images are kept)
 .playwright-mcp/
 *.png
+!docs/*.png
 
 # local tool caches
 .memsearch/

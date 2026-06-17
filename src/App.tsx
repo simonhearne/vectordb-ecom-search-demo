@@ -58,9 +58,13 @@ export function App() {
   const [drawerOpen, setDrawerOpen] = useState(false);
 
   const reqId = useRef(0);
-  // Query text we've already run understanding on — so we don't re-run the LLM on
+  // The raw query text we've already run understanding on — so we don't re-run the LLM on
   // filter/sort/page changes, only when the query text itself changes.
   const lastUnderstood = useRef("");
+  // The cleaned query to embed on follow-up fetches (filter/sort/page changes). The box
+  // keeps the user's original text, but we still search the clean text so the stripped
+  // filter phrases ("under $60") don't pollute the embedding. Empty until understood.
+  const embedText = useRef("");
   const activeFilters = useMemo(() => countActive(filters), [filters]);
 
   useEffect(() => {
@@ -80,8 +84,12 @@ export function App() {
     const rawQ = committedQuery.trim();
     // Only invoke the understanding LLM when the committed query text is new.
     const understand = rawQ !== "" && rawQ !== lastUnderstood.current;
+    // On the understanding pass, send the raw query so the proxy can extract filters from
+    // it. On follow-up fetches, send the cleaned text so the embedding stays filter-free.
+    // Empty committed query = browse, regardless of any stale cleaned text.
+    const q = rawQ === "" ? "" : understand ? rawQ : embedText.current || rawQ;
     const request: SearchRequest = {
-      q: rawQ || undefined,
+      q: q || undefined,
       filters,
       sort,
       limit: PAGE_SIZE,
@@ -96,20 +104,17 @@ export function App() {
         setMode(res.mode);
         setDiag({ request, response: res, clientMs: Math.round(performance.now() - started) });
 
-        // Adopt the proxy's interpretation: rewrite the box to the cleaned query and
-        // merge implied filters into the rail. The cleaned text re-parses to nothing,
-        // so this converges without looping.
+        // Adopt the proxy's interpretation: keep the user's original text in the box, but
+        // remember the cleaned query to embed on follow-up fetches, and merge implied
+        // filters into the rail. Marking rawQ as understood stops the LLM re-running.
         const parsed = res.parsed;
-        if (understand && parsed?.applied) {
-          lastUnderstood.current = parsed.cleanedQuery;
+        if (understand && parsed) {
+          lastUnderstood.current = rawQ;
+          embedText.current = parsed.cleanedQuery;
           const hasImplied = Object.keys(parsed.filters).length > 0;
-          if (parsed.cleanedQuery !== rawQ || hasImplied) {
-            // Adopt the cleaned text into both the box and the committed query so later
-            // filter/sort changes search the clean query without re-running the LLM.
-            if (parsed.cleanedQuery !== rawQ) {
-              setQuery(parsed.cleanedQuery);
-              setCommittedQuery(parsed.cleanedQuery);
-            }
+          // Only surface a note when something was actually extracted or cleaned —
+          // otherwise an unchanged query would still show an empty interpretation.
+          if (parsed.applied && (hasImplied || parsed.cleanedQuery !== rawQ)) {
             if (hasImplied) setFilters((prev) => mergeImplied(prev, parsed.filters));
             setInterpretation(parsed);
           }
@@ -145,6 +150,7 @@ export function App() {
     if (q === committedQuery) {
       setNonce((n) => n + 1);
     } else {
+      embedText.current = ""; // new query text — embed it raw until re-understood
       setFilters({});
       setInterpretation(null);
       setCommittedQuery(q);
@@ -152,6 +158,7 @@ export function App() {
   };
   // The clear (×) button resets to a pristine browse (empty query, no filters).
   const clearSearch = () => {
+    embedText.current = "";
     setQuery("");
     setCommittedQuery("");
     setFilters({});

@@ -2,6 +2,8 @@
 
 > [Live demo site](https://vdb-ecom.pages.dev/)
 
+[![Lumen — natural-language product search with query understanding and faceted filters](docs/screenshot.png)](https://vdb-ecom.pages.dev/)
+
 A minimalist, Amazon-style product search UI over an existing **Zilliz Cloud (Milvus)**
 collection of Amazon electronics. Semantic search is powered by **Cloudflare Workers AI**
 query embeddings; the catalog lives in Milvus. Built as a static React SPA on **Cloudflare

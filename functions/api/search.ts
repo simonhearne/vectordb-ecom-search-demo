@@ -132,6 +132,7 @@ Examples:
 "wireless earbuds over $50 with 100 reviews" -> {"cleaned_query":"wireless earbuds","price_min":50,"min_reviews":100}
 "tablet stand with 500 reviews" -> {"cleaned_query":"tablet stand","min_reviews":500}
 "highly rated 4k monitor between $200 and $400" -> {"cleaned_query":"4k monitor","price_min":200,"price_max":400,"min_rating":4}
+"headphones for kids with at least 4 stars under $60" -> {"cleaned_query":"headphones for kids","price_max":60,"min_rating":4}
 "cheap hdmi cable" -> {"cleaned_query":"hdmi cable"}`;
 
 // Returns the embedding text with filter phrases stripped, plus the implied filters.
@@ -182,12 +183,17 @@ function backstopFilters(q: string, base: Filters): Filters {
   const f: Filters = { ...base };
   const lc = q.toLowerCase();
 
+  // A bare number followed by star/rating/review is NOT a price ("at least 4 stars",
+  // "at least 100 reviews") — the negative lookahead keeps those out of the price bounds.
+  // `(?![\d.,])` forbids truncating the number (so "100" can't shrink to "10" to slip past
+  // the next assertion); then reject a number immediately followed by a rating/review word.
+  const NOT_RATING_OR_REVIEW = String.raw`(?![\d.,])(?!\s*\+?\s*(?:stars?|ratings?|reviews?)\b)`;
   if (f.priceMax == null) {
-    const m = lc.match(/(?:under|below|less than|cheaper than|up to|<=?)\s*\$?\s*(\d[\d,]*(?:\.\d+)?)/);
+    const m = lc.match(new RegExp(String.raw`(?:under|below|less than|cheaper than|up to|<=?)\s*\$?\s*(\d[\d,]*(?:\.\d+)?)` + NOT_RATING_OR_REVIEW));
     if (m) f.priceMax = toNum(m[1]);
   }
   if (f.priceMin == null) {
-    const m = lc.match(/(?:over|above|more than|at least|starting at|from|>=?)\s*\$?\s*(\d[\d,]*(?:\.\d+)?)/);
+    const m = lc.match(new RegExp(String.raw`(?:over|above|more than|at least|starting at|from|>=?)\s*\$?\s*(\d[\d,]*(?:\.\d+)?)` + NOT_RATING_OR_REVIEW));
     if (m) f.priceMin = toNum(m[1]);
   }
   if (f.minRating == null) {
