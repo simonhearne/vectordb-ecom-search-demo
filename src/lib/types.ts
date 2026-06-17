@@ -23,6 +23,7 @@ export interface SearchRequest {
   limit?: number;
   offset?: number;
   understand?: boolean; // run NL query understanding on q (default true when q present)
+  similarTo?: string; // parent_asin — "More like this": seed similarity from a product's stored vectors
 }
 
 // Result of natural-language query understanding on the proxy.
@@ -48,21 +49,21 @@ export interface Product {
 }
 
 export interface SearchDebug {
-  mode: "search" | "browse";
+  mode: "search" | "browse" | "similar";
   filter: string; // compiled Milvus boolean expression ("" when none)
   annsField?: string; // set for vector search
-  embedDim?: number; // length of the query vector (search only)
+  embedDim?: number; // length of the query/seed vector (search & similar)
   understandModel?: string; // Workers AI model used for query understanding
   limit: number;
   offset: number;
   count: number;
-  timings: { understandMs?: number; embedMs?: number; zillizMs: number; serverMs: number };
+  timings: { understandMs?: number; embedMs?: number; seedMs?: number; zillizMs: number; serverMs: number };
 }
 
 export interface SearchResponse {
   results: Product[];
   total?: number;
-  mode: "search" | "browse";
+  mode: "search" | "browse" | "similar";
   parsed?: ParsedQuery;
   debug?: SearchDebug;
 }

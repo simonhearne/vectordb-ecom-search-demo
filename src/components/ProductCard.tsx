@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { Product } from "../lib/types";
 import { hasPrice } from "../lib/types";
 import { Stars } from "./Stars";
-import { ImageOffIcon } from "./icons";
+import { ImageOffIcon, SimilarIcon } from "./icons";
 
 const priceFmt = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -10,7 +10,15 @@ const priceFmt = new Intl.NumberFormat("en-US", {
 });
 const countFmt = new Intl.NumberFormat("en-US");
 
-export function ProductCard({ product, index }: { product: Product; index: number }) {
+export function ProductCard({
+  product,
+  index,
+  onMoreLikeThis,
+}: {
+  product: Product;
+  index: number;
+  onMoreLikeThis?: (p: Product) => void;
+}) {
   const [broken, setBroken] = useState(false);
   const p = product;
 
@@ -38,6 +46,17 @@ export function ProductCard({ product, index }: { product: Product; index: numbe
           <span className="absolute left-3 top-3 max-w-[70%] truncate rounded-full bg-surface/85 px-2.5 py-1 text-[11px] font-semibold text-muted backdrop-blur-sm">
             {p.store}
           </span>
+        )}
+        {onMoreLikeThis && (
+          <button
+            type="button"
+            onClick={() => onMoreLikeThis(p)}
+            title="Find similar products"
+            className="absolute bottom-3 right-3 flex items-center gap-1.5 rounded-full bg-surface/90 px-3 py-1.5 text-[11px] font-semibold text-ink opacity-0 shadow-sm backdrop-blur-sm transition-all duration-200 hover:bg-ink hover:text-paper focus-visible:opacity-100 group-hover:opacity-100"
+          >
+            <SimilarIcon className="h-3.5 w-3.5" />
+            More like this
+          </button>
         )}
       </div>
 
@@ -74,7 +93,7 @@ export function ProductCard({ product, index }: { product: Product; index: numbe
           {typeof p.score === "number" && (
             <span
               className="rounded-full bg-accent-soft px-2 py-0.5 text-[11px] font-semibold text-accent tabular-nums"
-              title="Cosine similarity to your query"
+              title="Relevance score"
             >
               {p.score.toFixed(2)}
             </span>

@@ -6,9 +6,14 @@ proxy that embeds the query via **Workers AI** and searches Zilliz. The browser 
 sees the DB key and never calls Zilliz directly.
 
 ## Commands
-- `npm run dev` — full-stack local dev (`wrangler pages dev -- vite`): Vite HMR with the
-  `/api` Function + AI binding in front. Needs `.dev.vars` (see below) + `wrangler login`.
-- `npm run dev:vite` — UI only (no `/api`, no bindings).
+- `npm run dev` — full-stack local dev (`scripts/dev.mjs`): **Vite is the front door**
+  (HMR, http://localhost:5173) and proxies `/api` to a `wrangler pages dev` Functions backend
+  (http://localhost:8788) that holds the AI binding + secrets. Open the **:5173** URL. Needs
+  `.dev.vars` (see below) + `wrangler login`. (Why a launcher, not `pages dev -- vite`: current
+  wrangler rejects a proxy *command* when the config sets `pages_build_output_dir` — which
+  `pages deploy` needs to apply the `[ai]` binding — so we run wrangler in directory mode and
+  let Vite proxy to it; see `vite.config.ts`.)
+- `npm run dev:vite` — UI only on :5173 (no backend, so `/api` calls fail).
 - `npm run build` — `vite build` → `dist/`.
 - `npm run build:facets` — regenerate `public/facets.json` from the live collection.
 - `npm run typecheck` — `tsc --noEmit`.
@@ -48,11 +53,11 @@ from price filter, sort last on price sorts. Helper: `hasPrice()` in `src/lib/ty
   `Authorization: Bearer <token>`. Serverless caps: `limit ≤ 1024`, `limit+offset < 16384`.
 
 ## Layout
-- `functions/api/search.ts` — proxy: `POST /api/search` (vector search when `q`, scalar
-  browse when empty). `understandQuery()` runs NL query understanding; `compileFilter()`
-  builds the Milvus expr (escaped); `applySort()` reorders the retrieved window. Response
-  includes `parsed` (interpretation) and a `debug` block (compiled filter, embed dim,
-  timing breakdown) consumed by the diagnostics panel.
+- `functions/api/search.ts` — proxy: `POST /api/search` (vector search when `q`; "More
+  like this" similarity when `similarTo`; scalar browse otherwise). `understandQuery()` runs
+  NL query understanding; `compileFilter()` builds the Milvus expr (escaped); `applySort()`
+  reorders the retrieved window. Response includes `parsed` (interpretation) and a `debug`
+  block (compiled filter, embed dim, timing breakdown) consumed by the diagnostics panel.
 - `src/components/DiagnosticsPanel.tsx` — collapsible panel beneath the results showing the
   query, compiled filter, window, latency (client round-trip + server understand/embed/
   zilliz), and raw results JSON.
@@ -60,8 +65,10 @@ from price filter, sort last on price sorts. Helper: `hasPrice()` in `src/lib/ty
   text + implied-filter chips), dismissible.
 - `src/App.tsx` — state container: submit-driven search, filters/sort/pagination, drawer,
   adopting the proxy's interpretation.
-- `src/lib/searchClient.ts` — single front-end DB seam (calls `/api/search`; `/api/similar`
-  is a deferred stub).
+- `src/components/SimilarNote.tsx` — banner shown in "More like this" mode (names the seed
+  product, offers an exit ×).
+- `src/lib/searchClient.ts` — single front-end DB seam (all DB access via `/api/search`;
+  "More like this" reuses it with `similarTo`).
 - `src/lib/types.ts` — shared request/response contract (imported by both sides).
 - `scripts/build-facets.mjs` → `public/facets.json` (top brands/categories/price bounds).
 - `src/components/` — Header (search + Search button + sort), FilterPanel, ProductGrid/Card,
@@ -88,6 +95,17 @@ at ~0.6-1s. AVOID: `llama-3.1-8b-instruct`/`-fast`, `llama-3-8b-instruct`,
 `hermes-2-pro-mistral-7b`, `mistral-7b` (deprecated 2026-05-30); `llama-3.3-70b-instruct-fp8-fast`
 (correct but ~60s); `gemma-3-12b-it` / `mistral-small-3.1-24b` (dropped constraints on ranges).
 
-## Deferred (not built)
-- `/api/similar` ("More like this") — search-by-stored-PK (`ids`) on `image_vec`/`text_vec`.
-  Leave a seam in `searchClient`.
+## More like this (similar products)
+A third query type alongside search/browse. Clicking the hover-revealed "More like this"
+button on any `ProductCard` runs a similarity search **seeded by that product's stored
+vectors** — no browser embedding. The proxy: (1) reads the seed's `text_vec` + `image_vec`
+by PK via `entities/query` (`outputFields:["text_vec","image_vec"]` — vectors *are*
+retrievable on serverless), (2) runs `entities/hybrid_search` with two sub-searches (one per
+field) blended by **RRF** (`rerank:{strategy:"rrf",params:{k:60}}`), excluding the seed
+(`parent_asin != "<id>"`) and folding in any manual filters. Score field is the RRF
+`distance`. If the seed has no `image_vec`, it degrades to a single `text_vec`
+`entities/search`. Driven by `SearchRequest.similarTo` (a `parent_asin`); `mode:"similar"`.
+Client (`App.tsx`): clicking sets `similarTo` (the whole `Product`, for the banner title) and
+starts a **fresh slate** (clears query text + filters, like a new query); a typed search or the
+banner × exits similar mode. Reuses the whole fetch effect, grid, sort, filters, pagination,
+and diagnostics. Serverless caps still apply (sub-search `limit = offset+limit ≤ 1024`).

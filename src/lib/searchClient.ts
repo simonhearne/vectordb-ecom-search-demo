@@ -21,5 +21,5 @@ export async function loadFacets(): Promise<Facets> {
   return (await res.json()) as Facets;
 }
 
-// Deferred: "More like this" via /api/similar (search-by-stored-PK on image_vec/text_vec).
-// export async function similar(parentAsin: string, mode: "image" | "text") { ... }
+// "More like this" reuses search() — pass `similarTo: parent_asin` and the proxy seeds the
+// similarity from that product's stored text_vec + image_vec (no q, no embedding).

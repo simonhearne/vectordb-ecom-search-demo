@@ -17,6 +17,7 @@ import { Pagination } from "./components/Pagination";
 import { LoadingGrid, EmptyState, ErrorState } from "./components/States";
 import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
 import { InterpretationNote } from "./components/InterpretationNote";
+import { SimilarNote } from "./components/SimilarNote";
 import { XIcon } from "./components/icons";
 
 // Merge implied filters into the current ones, returning the SAME reference when nothing
@@ -49,8 +50,9 @@ export function App() {
   const [page, setPage] = useState(0);
   const [nonce, setNonce] = useState(0);
 
+  const [similarTo, setSimilarTo] = useState<Product | null>(null); // "More like this" seed
   const [results, setResults] = useState<Product[]>([]);
-  const [mode, setMode] = useState<"search" | "browse">("browse");
+  const [mode, setMode] = useState<"search" | "browse" | "similar">("browse");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [diag, setDiag] = useState<Diagnostics | null>(null);
@@ -71,10 +73,10 @@ export function App() {
     loadFacets().then(setFacets).catch(() => setFacets(null));
   }, []);
 
-  // Reset to first page whenever the committed query, filters, or sort change.
+  // Reset to first page whenever the committed query, similar seed, filters, or sort change.
   useEffect(() => {
     setPage(0);
-  }, [committedQuery, filters, sort]);
+  }, [committedQuery, similarTo, filters, sort]);
 
   // Fetch on any input change. reqId guards against out-of-order responses.
   useEffect(() => {
@@ -82,20 +84,29 @@ export function App() {
     setLoading(true);
     setError(null);
     const rawQ = committedQuery.trim();
-    // Only invoke the understanding LLM when the committed query text is new.
-    const understand = rawQ !== "" && rawQ !== lastUnderstood.current;
+    // Only invoke the understanding LLM when the committed query text is new (never in
+    // similar mode, which seeds from stored vectors rather than an embedded query).
+    const understand = !similarTo && rawQ !== "" && rawQ !== lastUnderstood.current;
     // On the understanding pass, send the raw query so the proxy can extract filters from
     // it. On follow-up fetches, send the cleaned text so the embedding stays filter-free.
     // Empty committed query = browse, regardless of any stale cleaned text.
     const q = rawQ === "" ? "" : understand ? rawQ : embedText.current || rawQ;
-    const request: SearchRequest = {
-      q: q || undefined,
-      filters,
-      sort,
-      limit: PAGE_SIZE,
-      offset: page * PAGE_SIZE,
-      understand,
-    };
+    const request: SearchRequest = similarTo
+      ? {
+          similarTo: similarTo.parent_asin,
+          filters,
+          sort,
+          limit: PAGE_SIZE,
+          offset: page * PAGE_SIZE,
+        }
+      : {
+          q: q || undefined,
+          filters,
+          sort,
+          limit: PAGE_SIZE,
+          offset: page * PAGE_SIZE,
+          understand,
+        };
     const started = performance.now();
     search(request)
       .then((res) => {
@@ -128,7 +139,7 @@ export function App() {
       .finally(() => {
         if (id === reqId.current) setLoading(false);
       });
-  }, [committedQuery, filters, sort, page, nonce]);
+  }, [committedQuery, similarTo, filters, sort, page, nonce]);
 
   const patch = (p: Partial<Filters>) => setFilters((prev) => ({ ...prev, ...p }));
   const clearFilters = () => {
@@ -136,6 +147,19 @@ export function App() {
     setInterpretation(null);
   };
   const retry = () => setNonce((n) => n + 1);
+
+  // "More like this": switch to similarity mode seeded by this product. Starts from a clean
+  // slate (no query text, no filters) so results reflect the product, not the prior query.
+  const moreLikeThis = (p: Product) => {
+    embedText.current = "";
+    lastUnderstood.current = "";
+    setQuery("");
+    setCommittedQuery("");
+    setInterpretation(null);
+    setFilters({});
+    setSimilarTo(p);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
 
   // Typing only updates the box — it does not search. Editing clears the prior note.
   const handleUserQuery = (v: string) => {
@@ -147,7 +171,8 @@ export function App() {
   // the same text keeps filters and just refetches.
   const submitSearch = () => {
     const q = query.trim();
-    if (q === committedQuery) {
+    setSimilarTo(null); // a typed search always leaves "More like this" mode
+    if (q === committedQuery && !similarTo) {
       setNonce((n) => n + 1);
     } else {
       embedText.current = ""; // new query text — embed it raw until re-understood
@@ -163,6 +188,7 @@ export function App() {
     setCommittedQuery("");
     setFilters({});
     setInterpretation(null);
+    setSimilarTo(null);
   };
 
   const hasNext = results.length === PAGE_SIZE;
@@ -170,6 +196,9 @@ export function App() {
   const summary = () => {
     if (loading) return "Searching…";
     const n = results.length;
+    if (mode === "similar") {
+      return `${n}${hasNext ? "+" : ""} product${n === 1 ? "" : "s"} similar to “${similarTo?.title ?? ""}”`;
+    }
     if (mode === "search") {
       const base = `${n}${hasNext ? "+" : ""} match${n === 1 ? "" : "es"} for “${committedQuery.trim()}”`;
       return sort === "relevance" ? base : `${base} · re-ranked within top matches`;
@@ -216,12 +245,14 @@ export function App() {
 
           {/* Results */}
           <section>
-            {interpretation && (
+            {similarTo ? (
+              <SimilarNote product={similarTo} onClear={clearSearch} />
+            ) : interpretation ? (
               <InterpretationNote
                 parsed={interpretation}
                 onDismiss={() => setInterpretation(null)}
               />
-            )}
+            ) : null}
 
             <div className="mb-5 flex items-baseline justify-between gap-4">
               <p className="text-sm text-muted" aria-live="polite">
@@ -237,7 +268,7 @@ export function App() {
               <EmptyState query={committedQuery.trim()} />
             ) : (
               <>
-                <ProductGrid products={results} />
+                <ProductGrid products={results} onMoreLikeThis={moreLikeThis} />
                 <Pagination page={page} hasNext={hasNext} onPage={setPage} />
               </>
             )}

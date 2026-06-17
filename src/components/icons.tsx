@@ -38,6 +38,19 @@ export const GitHubIcon = ({ className }: P) => (
   </svg>
 );
 
+export const SimilarIcon = ({ className }: P) => (
+  <svg className={className} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <rect x="4" y="4" width="9" height="9" rx="2" stroke="currentColor" strokeWidth="1.7" />
+    <path
+      d="M16 9h2.5A1.5 1.5 0 0 1 20 10.5V18a2 2 0 0 1-2 2h-7.5A1.5 1.5 0 0 1 9 18.5V16"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
 export const ImageOffIcon = ({ className }: P) => (
   <svg className={className} viewBox="0 0 24 24" fill="none" aria-hidden="true">
     <rect x="3" y="4" width="18" height="16" rx="2.5" stroke="currentColor" strokeWidth="1.6" />

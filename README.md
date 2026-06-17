@@ -124,8 +124,8 @@ flowchart TB
 
 > Each batch (`FETCH_BATCH=256`) downloads images, embeds text + images, and upserts in one
 > flush, then advances the checkpoint — so an interrupted run resumes where it left off.
-> `image_vec` is stored for the deferred "More like this" feature; the live app searches
-> `text_vec` only.
+> `image_vec` is stored and powers the "More like this" feature (text + image similarity,
+> RRF-blended); plain query search uses `text_vec`.
 
 ## Setup
 
@@ -270,7 +270,12 @@ filters, so phrases like "under $10" shape the *filter* instead of polluting the
 | `src/components/` | UI: header, filter panel, product grid/card, pagination, states |
 | `wrangler.toml` | `[ai]` binding + Pages output dir |
 
-## Not built (deferred)
+## More like this
 
-"More like this" (`POST /api/similar`) — search-by-stored-PK (`ids`) on `image_vec` /
-`text_vec`. A seam is left in `src/lib/searchClient.ts`.
+Every product card has a hover-revealed **"More like this"** button. It runs a similarity
+search seeded by that product's *stored* vectors — no query, no re-embedding. The proxy reads
+the seed's `text_vec` + `image_vec` by primary key, then blends a search on each field with
+**reciprocal-rank fusion** (`entities/hybrid_search`, `rerank: rrf`), so results are close in
+both wording and appearance. The seed itself is excluded, manual filters/sort still apply, and
+the grid/pagination/diagnostics are reused. It's a third query mode (`similarTo` →
+`mode: "similar"`) rather than a separate endpoint — a typed search or the banner × exits it.

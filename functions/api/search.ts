@@ -262,6 +262,7 @@ export async function onRequestPost(ctx: Ctx): Promise<Response> {
 
     const body = (await ctx.request.json()) as SearchRequest;
     const rawQ = (body.q ?? "").trim();
+    const seedId = (body.similarTo ?? "").trim();
     const sort: SortKey = body.sort ?? "relevance";
 
     const offset = Math.max(0, Math.floor(body.offset ?? 0));
@@ -301,13 +302,69 @@ export async function onRequestPost(ctx: Ctx): Promise<Response> {
     const filter = compileFilter(effectiveFilters);
 
     let rows: Record<string, any>[];
-    let mode: "search" | "browse";
+    let mode: "search" | "browse" | "similar";
     let embedMs: number | undefined;
     let embedDim: number | undefined;
+    let seedMs: number | undefined;
+    let annsField: string | undefined;
     let zStart: number;
 
-    if (rawQ) {
+    if (seedId) {
+      // "More like this": seed similarity from a product's stored vectors — no embedding.
+      mode = "similar";
+      const ts = Date.now();
+      const seedOut = await zilliz(env, "entities/query", {
+        collectionName: COLLECTION,
+        filter: `parent_asin == "${esc(seedId)}"`,
+        limit: 1,
+        outputFields: ["text_vec", "image_vec"],
+      });
+      seedMs = Date.now() - ts;
+      const seedRow = seedOut.data?.[0];
+      if (!seedRow) throw new Error(`No product found for "${seedId}"`);
+      const textVec = seedRow.text_vec;
+      const imageVec = seedRow.image_vec;
+      embedDim = Array.isArray(textVec) ? textVec.length : undefined;
+
+      // Exclude the seed itself; fold in any manual filters from the rail.
+      const exclude = `parent_asin != "${esc(seedId)}"`;
+      const subFilter = filter ? `${filter} and ${exclude}` : exclude;
+      // Each sub-search must surface enough candidates to fill the requested page.
+      const subLimit = Math.min(offset + limit, MAX_LIMIT);
+
+      zStart = Date.now();
+      if (Array.isArray(imageVec) && imageVec.length) {
+        // Blend semantic-text and visual similarity via reciprocal-rank fusion.
+        annsField = "text_vec + image_vec (rrf)";
+        const out = await zilliz(env, "entities/hybrid_search", {
+          collectionName: COLLECTION,
+          search: [
+            { data: [textVec], annsField: "text_vec", filter: subFilter, limit: subLimit },
+            { data: [imageVec], annsField: "image_vec", filter: subFilter, limit: subLimit },
+          ],
+          rerank: { strategy: "rrf", params: { k: 60 } },
+          limit,
+          offset,
+          outputFields: OUTPUT_FIELDS,
+        });
+        rows = out.data ?? [];
+      } else {
+        // Seed has no image vector — degrade to text-only similarity.
+        annsField = "text_vec";
+        const out = await zilliz(env, "entities/search", {
+          collectionName: COLLECTION,
+          data: [textVec],
+          annsField: "text_vec",
+          filter: subFilter,
+          limit,
+          offset,
+          outputFields: OUTPUT_FIELDS,
+        });
+        rows = out.data ?? [];
+      }
+    } else if (rawQ) {
       mode = "search";
+      annsField = ANNS_FIELD;
       const te = Date.now();
       const vector = await embedQuery(env, cleanedQuery);
       embedMs = Date.now() - te;
@@ -347,13 +404,13 @@ export async function onRequestPost(ctx: Ctx): Promise<Response> {
       debug: {
         mode,
         filter,
-        annsField: mode === "search" ? ANNS_FIELD : undefined,
+        annsField,
         embedDim,
         understandModel: understood ? UNDERSTAND_MODEL : undefined,
         limit,
         offset,
         count: results.length,
-        timings: { understandMs, embedMs, zillizMs, serverMs: Date.now() - t0 },
+        timings: { understandMs, embedMs, seedMs, zillizMs, serverMs: Date.now() - t0 },
       },
     };
     return json(payload, 200);
