@@ -12,12 +12,17 @@ sees the DB key and never calls Zilliz directly.
 - `npm run build` — `vite build` → `dist/`.
 - `npm run build:facets` — regenerate `public/facets.json` from the live collection.
 - `npm run typecheck` — `tsc --noEmit`.
-- `npm run deploy` — build + `wrangler pages deploy dist`.
+- `npm run deploy` — build + `wrangler pages deploy dist` (preview, named after git branch).
+- `npm run deploy:prod` — build + deploy to production (`--branch main` → `vdb-ecom.pages.dev`).
 
 ## Secrets / config
 - Local: `.dev.vars` (gitignored) with `ZILLIZ_ENDPOINT`, `ZILLIZ_TOKEN`. Template in
   `.dev.vars.example`.
-- Prod: `wrangler pages secret put ZILLIZ_ENDPOINT` / `... ZILLIZ_TOKEN`.
+- Prod: the Pages project must exist first (`wrangler pages project create vdb-ecom
+  --production-branch main`), then `wrangler pages secret put ZILLIZ_ENDPOINT` / `... TOKEN`.
+- Secrets are **per-environment**: `secret put` targets production; add `--environment preview`
+  for preview deploys. Changes apply only to the *next* deploy. Preview URL is
+  `<branch>.vdb-ecom.pages.dev`; production is `vdb-ecom.pages.dev`.
 - Workers AI: `[ai]` binding `AI` in `wrangler.toml`. The binding proxies to real Workers
   AI **even in local dev** (incurs charges).
 
@@ -53,6 +58,14 @@ from price filter, sort last on price sorts. Helper: `hasPrice()` in `src/lib/ty
   zilliz), and raw results JSON.
 - `src/components/InterpretationNote.tsx` — shows how a NL query was interpreted (cleaned
   text + implied-filter chips), dismissible.
+- `src/App.tsx` — state container: submit-driven search, filters/sort/pagination, drawer,
+  adopting the proxy's interpretation.
+- `src/lib/searchClient.ts` — single front-end DB seam (calls `/api/search`; `/api/similar`
+  is a deferred stub).
+- `src/lib/types.ts` — shared request/response contract (imported by both sides).
+- `scripts/build-facets.mjs` → `public/facets.json` (top brands/categories/price bounds).
+- `src/components/` — Header (search + Search button + sort), FilterPanel, ProductGrid/Card,
+  Pagination, Stars, States, icons.
 
 ## Query understanding
 NL queries like "remote control under $10" are parsed by the proxy via Workers AI JSON mode
@@ -74,11 +87,6 @@ Model notes (Workers AI, as of 2026-06): Llama 4 Scout is correct on ranges/mult
 at ~0.6-1s. AVOID: `llama-3.1-8b-instruct`/`-fast`, `llama-3-8b-instruct`,
 `hermes-2-pro-mistral-7b`, `mistral-7b` (deprecated 2026-05-30); `llama-3.3-70b-instruct-fp8-fast`
 (correct but ~60s); `gemma-3-12b-it` / `mistral-small-3.1-24b` (dropped constraints on ranges).
-- `src/lib/searchClient.ts` — single front-end DB seam (calls `/api/search`; `/api/similar`
-  is a deferred stub).
-- `src/lib/types.ts` — shared request/response contract (imported by both sides).
-- `scripts/build-facets.mjs` → `public/facets.json` (top brands/categories/price bounds).
-- `src/components/` — UI.
 
 ## Deferred (not built)
 - `/api/similar` ("More like this") — search-by-stored-PK (`ids`) on `image_vec`/`text_vec`.

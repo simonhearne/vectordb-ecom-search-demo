@@ -162,9 +162,12 @@ filters, so phrases like "under $10" shape the *filter* instead of polluting the
   filter/sort/page changes), then rewrites the search box to the cleaned text, merges implied
   filters into the rail, and shows a dismissible interpretation note. The cleaned text
   re-parses to nothing, so this converges without a loop.
+- **UX**: search is submit-driven (Enter or the Search button), not as-you-type — the
+  understanding model only runs when the committed query text changes. Submitting a new query
+  clears the filter rail first so the prior query's implied filters don't carry over.
 - **Resilience**: understanding is best-effort and wrapped in try/catch — if the model call
-  fails, the raw query is embedded and the search still returns. Latency is visible in the
-  diagnostics panel (`understand` timing); typical ~0.3–0.6 s with the `-fast` model.
+  fails, the regex backstop and raw query are used so the search still returns. Latency is
+  visible in the diagnostics panel (`understand` timing); typical ~0.6–1 s with Llama 4 Scout.
 
 > Model note: Llama 4 Scout handles ranges and multi-constraint queries correctly at ~0.6–1s.
 > Several older models (`llama-3.1-8b-instruct`, `llama-3-8b-instruct`, `hermes-2-pro`,

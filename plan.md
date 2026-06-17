@@ -121,3 +121,41 @@ A working Cloudflare Pages repo: static SPA, the Pages Function proxy (search +
 similar), `facets.json` build step, `wrangler.toml`, and README. Lead your first
 reply with the STEP 0 verification results and the query-embedding format you
 settled on.
+
+---
+
+## Implementation status (as built)
+This section reconciles the spec above with what was actually built. The spec stays
+as the record of intent; this is the source of truth for current behaviour.
+
+**Built & deployed** (Cloudflare Pages, project `vdb-ecom`):
+- Static React + Vite + TS + Tailwind v4 SPA; `functions/api/search.ts` proxy; `facets.json`
+  build script; refined "Lumen" paper-and-ink UI.
+- Search / browse / filters / sort / pagination, diagnostics panel, and **NL query
+  understanding** (see below) — an addition beyond the original spec.
+
+**STEP 0 outcome:** parity passed (1024-d, 6/6 rank-1, mean cosine ~0.87). Runtime query form
+is `{ queries: q, instruction: "Given a shopping query, retrieve relevant product listings" }`
+via `@cf/qwen/qwen3-embedding-0.6b` — i.e. the Workers AI wrapper takes the instruction as a
+field, not the literal `Instruct:…\nQuery:…` string the spec guessed. Response shape is
+`{ shape, data }` (vector = `data[0]`).
+
+**Divergences from the spec (verified against live data/APIs):**
+- `price` is **not** clean — it contains `-1` sentinels for unknown prices. Treated as
+  "no price" (hidden, excluded when a price filter is active, sorted last).
+- Milvus REST v2 serialises `ARRAY<VARCHAR>` (`categories`) as
+  `{ Data: { StringData: { data: [...] } } }` — unwrapped on read in the proxy and facets script.
+- Zilliz serverless caps enforced: `limit ≤ 1024`, `limit + offset < 16384`. Score field is
+  `distance`.
+
+**Added beyond spec — query understanding:** the proxy parses NL queries (e.g.
+"remote control under $10") via Workers AI JSON mode (`@cf/meta/llama-4-scout-17b-16e-instruct`)
+into a cleaned embedding query + implied numeric filters (price/rating/reviews, incl. ranges),
+with a deterministic regex backstop. The UI is **submit-driven** (Enter / Search button), adopts
+the cleaned query, and surfaces the interpretation; a new query clears the filter rail.
+
+**Deferred (not built):** `POST /api/similar` ("More like this"). The simpler approach is
+search-by-stored-PK (`ids`) on `image_vec`/`text_vec` — no query-time model needed. A seam is
+left in `src/lib/searchClient.ts`.
+
+See `README.md` (usage/deploy) and `CLAUDE.md` (conventions, model notes, commands) for detail.
