@@ -1,0 +1,285 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import type {
+  Diagnostics,
+  Facets,
+  Filters,
+  ParsedQuery,
+  Product,
+  SearchRequest,
+  SortKey,
+} from "./lib/types";
+import { PAGE_SIZE } from "./lib/config";
+import { loadFacets, search } from "./lib/searchClient";
+import { Header } from "./components/Header";
+import { FilterPanel } from "./components/FilterPanel";
+import { ProductGrid } from "./components/ProductGrid";
+import { Pagination } from "./components/Pagination";
+import { LoadingGrid, EmptyState, ErrorState } from "./components/States";
+import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
+import { InterpretationNote } from "./components/InterpretationNote";
+import { XIcon } from "./components/icons";
+
+// Merge implied filters into the current ones, returning the SAME reference when nothing
+// actually changes — so adopting an already-applied interpretation doesn't refetch.
+function mergeImplied(prev: Filters, implied: Filters): Filters {
+  const next = { ...prev, ...implied };
+  for (const k of Object.keys(implied) as (keyof Filters)[]) {
+    if (prev[k] !== next[k]) return next;
+  }
+  return prev;
+}
+
+function countActive(f: Filters): number {
+  let n = 0;
+  if (f.priceMin != null) n++;
+  if (f.priceMax != null) n++;
+  if (f.minRating != null) n++;
+  if (f.minReviews) n++;
+  if (f.category) n++;
+  n += f.brands?.length ?? 0;
+  return n;
+}
+
+export function App() {
+  const [facets, setFacets] = useState<Facets | null>(null);
+  const [query, setQuery] = useState(""); // search box text (not yet submitted)
+  const [committedQuery, setCommittedQuery] = useState(""); // the submitted query that drives search
+  const [filters, setFilters] = useState<Filters>({});
+  const [sort, setSort] = useState<SortKey>("relevance");
+  const [page, setPage] = useState(0);
+  const [nonce, setNonce] = useState(0);
+
+  const [results, setResults] = useState<Product[]>([]);
+  const [mode, setMode] = useState<"search" | "browse">("browse");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [diag, setDiag] = useState<Diagnostics | null>(null);
+  const [interpretation, setInterpretation] = useState<ParsedQuery | null>(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+
+  const reqId = useRef(0);
+  // Query text we've already run understanding on — so we don't re-run the LLM on
+  // filter/sort/page changes, only when the query text itself changes.
+  const lastUnderstood = useRef("");
+  const activeFilters = useMemo(() => countActive(filters), [filters]);
+
+  useEffect(() => {
+    loadFacets().then(setFacets).catch(() => setFacets(null));
+  }, []);
+
+  // Reset to first page whenever the committed query, filters, or sort change.
+  useEffect(() => {
+    setPage(0);
+  }, [committedQuery, filters, sort]);
+
+  // Fetch on any input change. reqId guards against out-of-order responses.
+  useEffect(() => {
+    const id = ++reqId.current;
+    setLoading(true);
+    setError(null);
+    const rawQ = committedQuery.trim();
+    // Only invoke the understanding LLM when the committed query text is new.
+    const understand = rawQ !== "" && rawQ !== lastUnderstood.current;
+    const request: SearchRequest = {
+      q: rawQ || undefined,
+      filters,
+      sort,
+      limit: PAGE_SIZE,
+      offset: page * PAGE_SIZE,
+      understand,
+    };
+    const started = performance.now();
+    search(request)
+      .then((res) => {
+        if (id !== reqId.current) return;
+        setResults(res.results);
+        setMode(res.mode);
+        setDiag({ request, response: res, clientMs: Math.round(performance.now() - started) });
+
+        // Adopt the proxy's interpretation: rewrite the box to the cleaned query and
+        // merge implied filters into the rail. The cleaned text re-parses to nothing,
+        // so this converges without looping.
+        const parsed = res.parsed;
+        if (understand && parsed?.applied) {
+          lastUnderstood.current = parsed.cleanedQuery;
+          const hasImplied = Object.keys(parsed.filters).length > 0;
+          if (parsed.cleanedQuery !== rawQ || hasImplied) {
+            // Adopt the cleaned text into both the box and the committed query so later
+            // filter/sort changes search the clean query without re-running the LLM.
+            if (parsed.cleanedQuery !== rawQ) {
+              setQuery(parsed.cleanedQuery);
+              setCommittedQuery(parsed.cleanedQuery);
+            }
+            if (hasImplied) setFilters((prev) => mergeImplied(prev, parsed.filters));
+            setInterpretation(parsed);
+          }
+        }
+      })
+      .catch((e: unknown) => {
+        if (id !== reqId.current) return;
+        setError(e instanceof Error ? e.message : String(e));
+        setResults([]);
+      })
+      .finally(() => {
+        if (id === reqId.current) setLoading(false);
+      });
+  }, [committedQuery, filters, sort, page, nonce]);
+
+  const patch = (p: Partial<Filters>) => setFilters((prev) => ({ ...prev, ...p }));
+  const clearFilters = () => {
+    setFilters({});
+    setInterpretation(null);
+  };
+  const retry = () => setNonce((n) => n + 1);
+
+  // Typing only updates the box — it does not search. Editing clears the prior note.
+  const handleUserQuery = (v: string) => {
+    setQuery(v);
+    if (interpretation) setInterpretation(null);
+  };
+  // Enter or the Search button commits the current box text. A new query starts with a
+  // clean filter slate (so the prior query's implied filters don't leak in); re-submitting
+  // the same text keeps filters and just refetches.
+  const submitSearch = () => {
+    const q = query.trim();
+    if (q === committedQuery) {
+      setNonce((n) => n + 1);
+    } else {
+      setFilters({});
+      setInterpretation(null);
+      setCommittedQuery(q);
+    }
+  };
+  // The clear (×) button resets to a pristine browse (empty query, no filters).
+  const clearSearch = () => {
+    setQuery("");
+    setCommittedQuery("");
+    setFilters({});
+    setInterpretation(null);
+  };
+
+  const hasNext = results.length === PAGE_SIZE;
+
+  const summary = () => {
+    if (loading) return "Searching…";
+    const n = results.length;
+    if (mode === "search") {
+      const base = `${n}${hasNext ? "+" : ""} match${n === 1 ? "" : "es"} for “${committedQuery.trim()}”`;
+      return sort === "relevance" ? base : `${base} · re-ranked within top matches`;
+    }
+    return `Browsing ${n}${hasNext ? "+" : ""} product${n === 1 ? "" : "s"}`;
+  };
+
+  return (
+    <div className="min-h-screen">
+      <Header
+        query={query}
+        onQuery={handleUserQuery}
+        onSubmit={submitSearch}
+        onClear={clearSearch}
+        sort={sort}
+        onSort={setSort}
+        onOpenFilters={() => setDrawerOpen(true)}
+        activeFilters={activeFilters}
+      />
+
+      <main className="mx-auto max-w-[1400px] px-4 py-6 sm:px-6 lg:py-10">
+        <div className="lg:grid lg:grid-cols-[256px_1fr] lg:gap-10">
+          {/* Desktop filter rail */}
+          <aside className="hidden lg:block">
+            <div className="sticky top-28">
+              <div className="mb-3 flex items-center justify-between">
+                <h2 className="font-display text-lg font-semibold text-ink">Filters</h2>
+                {activeFilters > 0 && (
+                  <button
+                    onClick={clearFilters}
+                    className="text-xs font-semibold text-accent hover:text-accent-hover"
+                  >
+                    Clear all ({activeFilters})
+                  </button>
+                )}
+              </div>
+              {facets ? (
+                <FilterPanel facets={facets} filters={filters} onChange={patch} />
+              ) : (
+                <p className="text-sm text-faint">Loading filters…</p>
+              )}
+            </div>
+          </aside>
+
+          {/* Results */}
+          <section>
+            {interpretation && (
+              <InterpretationNote
+                parsed={interpretation}
+                onDismiss={() => setInterpretation(null)}
+              />
+            )}
+
+            <div className="mb-5 flex items-baseline justify-between gap-4">
+              <p className="text-sm text-muted" aria-live="polite">
+                {summary()}
+              </p>
+            </div>
+
+            {error ? (
+              <ErrorState message={error} onRetry={retry} />
+            ) : loading ? (
+              <LoadingGrid />
+            ) : results.length === 0 ? (
+              <EmptyState query={committedQuery.trim()} />
+            ) : (
+              <>
+                <ProductGrid products={results} />
+                <Pagination page={page} hasNext={hasNext} onPage={setPage} />
+              </>
+            )}
+          </section>
+        </div>
+
+        {diag && <DiagnosticsPanel diag={diag} />}
+      </main>
+
+      {/* Mobile filter drawer */}
+      {drawerOpen && (
+        <div className="fixed inset-0 z-50 lg:hidden">
+          <div
+            className="absolute inset-0 bg-ink/30 backdrop-blur-sm"
+            onClick={() => setDrawerOpen(false)}
+          />
+          <div className="absolute inset-y-0 left-0 flex w-[88%] max-w-sm flex-col bg-paper shadow-2xl">
+            <div className="flex items-center justify-between border-b border-line px-5 py-4">
+              <h2 className="font-display text-lg font-semibold">Filters</h2>
+              <button
+                onClick={() => setDrawerOpen(false)}
+                aria-label="Close filters"
+                className="rounded-full p-1.5 text-muted hover:bg-surface"
+              >
+                <XIcon className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-5 py-2">
+              {facets && <FilterPanel facets={facets} filters={filters} onChange={patch} />}
+            </div>
+            <div className="flex gap-3 border-t border-line px-5 py-4">
+              {activeFilters > 0 && (
+                <button
+                  onClick={clearFilters}
+                  className="rounded-full border border-line px-4 py-2.5 text-sm font-semibold text-ink"
+                >
+                  Clear
+                </button>
+              )}
+              <button
+                onClick={() => setDrawerOpen(false)}
+                className="flex-1 rounded-full bg-ink px-4 py-2.5 text-sm font-semibold text-paper transition-colors hover:bg-accent"
+              >
+                Show results
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
