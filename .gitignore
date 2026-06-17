@@ -1,0 +1,26 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+
+# Cloudflare / Wrangler
+.wrangler/
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+
+# local env
+.env
+.env.*
+
+# logs / misc
+*.log
+.DS_Store
+
+# playwright / screenshots
+.playwright-mcp/
+*.png
+
+# local tool caches
+.memsearch/

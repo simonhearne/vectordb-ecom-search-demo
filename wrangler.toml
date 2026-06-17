@@ -1,0 +1,13 @@
+name = "vdb-ecom"
+compatibility_date = "2025-06-01"
+pages_build_output_dir = "./dist"
+
+# Workers AI binding — query embedding via @cf/qwen/qwen3-embedding-0.6b.
+# Proxies to real Workers AI even in `wrangler pages dev` (incurs usage charges).
+[ai]
+binding = "AI"
+
+# Secrets (NOT set here — never commit them):
+#   ZILLIZ_ENDPOINT, ZILLIZ_TOKEN
+# Local dev: put them in .dev.vars (gitignored).
+# Production: `wrangler pages secret put ZILLIZ_ENDPOINT` / `... ZILLIZ_TOKEN`.

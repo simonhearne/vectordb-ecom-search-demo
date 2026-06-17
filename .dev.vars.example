@@ -1,0 +1,5 @@
+# Copy to `.dev.vars` (gitignored) and fill in. Used by `wrangler pages dev` and scripts.
+# Zilliz Cloud cluster public endpoint, e.g. https://in03-xxxx.serverless.aws-eu-central-1.cloud.zilliz.com
+ZILLIZ_ENDPOINT=
+# Zilliz read-only API key (role limited to Search/Query/Describe on this cluster+collection)
+ZILLIZ_TOKEN=
