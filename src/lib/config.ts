@@ -2,6 +2,8 @@ import type { SortKey } from "./types";
 
 export const PAGE_SIZE = 24;
 
+export const REPO_URL = "https://github.com/simonhearne/vectordb-ecom-search-demo";
+
 export const SORT_OPTIONS: { key: SortKey; label: string }[] = [
   { key: "relevance", label: "Relevance" },
   { key: "price_asc", label: "Price: low to high" },

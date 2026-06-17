@@ -1,6 +1,22 @@
 import type { SortKey } from "../lib/types";
-import { SORT_OPTIONS } from "../lib/config";
-import { SearchIcon, SlidersIcon, ChevronDown, XIcon } from "./icons";
+import { SORT_OPTIONS, REPO_URL } from "../lib/config";
+import { SearchIcon, SlidersIcon, ChevronDown, XIcon, GitHubIcon } from "./icons";
+
+function GitHubLink() {
+  return (
+    <a
+      href={REPO_URL}
+      target="_blank"
+      rel="noopener noreferrer"
+      aria-label="Fork this project on GitHub"
+      title="Fork on GitHub"
+      className="inline-flex shrink-0 items-center gap-2 rounded-full border border-line bg-surface px-3.5 py-2.5 text-sm font-semibold text-ink shadow-sm transition-colors hover:border-accent hover:text-accent"
+    >
+      <GitHubIcon className="h-[18px] w-[18px]" />
+      <span className="hidden lg:inline">Fork on GitHub</span>
+    </a>
+  );
+}
 
 function SearchBar({
   value,
@@ -135,9 +151,13 @@ export function Header({
           <div className="hidden md:block">
             <SortSelect sort={sort} onSort={onSort} />
           </div>
+          <div className="hidden md:block">
+            <GitHubLink />
+          </div>
 
           {/* mobile sort + filters */}
           <div className="ml-auto flex items-center gap-2 md:hidden">
+            <GitHubLink />
             <SortSelect sort={sort} onSort={onSort} />
             <FiltersButton onOpen={onOpenFilters} activeFilters={activeFilters} />
           </div>
