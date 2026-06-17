@@ -40,7 +40,9 @@ Zilliz Cloud (Milvus)  collection `amazon_reviews_electronics`
 - A **Cloudflare account** with Workers AI (the `[ai]` binding proxies to real Workers AI
   even in local dev, so it incurs usage charges). Authenticate once: `npx wrangler login`.
 - A **Zilliz Cloud** cluster hosting the `amazon_reviews_electronics` collection, and a
-  **read-only API key** (see [Security](#security)).
+  **read-only API key** (see [Security](#security)). The collection is built and ingested by
+  this [data-generation notebook](https://colab.research.google.com/drive/1eNVUQKPqHz2mOXAwrz9REU5MssEuNHHn)
+  (embeds product text with Qwen3-Embedding-0.6B and images with SigLIP, then loads Milvus).
 
 ## Setup
 
