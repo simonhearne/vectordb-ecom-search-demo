@@ -1,6 +1,6 @@
 # Lumen — vector-search e-commerce demo
 
-> [Live demo site](https://5e60bf53.vdb-ecom.pages.dev/)
+> [Live demo site](https://vdb-ecom.pages.dev/)
 
 A minimalist, Amazon-style product search UI over an existing **Zilliz Cloud (Milvus)**
 collection of Amazon electronics. Semantic search is powered by **Cloudflare Workers AI**
@@ -12,16 +12,41 @@ Pages** with a same-origin **Pages Function** proxy.
 
 ## Architecture
 
+The runtime is entirely on Cloudflare's edge: static assets and the API Function share one
+origin, and the Function is the only thing that ever talks to Zilliz.
+
+```mermaid
+flowchart TB
+    subgraph browser["🌐 Browser"]
+        spa["React SPA<br/><i>Vite build, static</i>"]
+    end
+
+    subgraph cf["☁️ Cloudflare Pages — same origin"]
+        assets["Static assets / CDN<br/><i>dist/ — HTML, JS, facets.json</i>"]
+        fn["Pages Function<br/><b>POST /api/search</b><br/><i>functions/api/search.ts</i>"]
+        ai["Workers AI<br/><i>[ai] binding</i>"]
+    end
+
+    subgraph zilliz["🗄️ Zilliz Cloud — Milvus"]
+        coll["Collection<br/><b>amazon_reviews_electronics</b><br/><i>text_vec · image_vec · scalars</i>"]
+    end
+
+    spa -- "GET / (load app)" --> assets
+    spa -- "POST /api/search<br/>{ q, filters, sort, limit, offset }" --> fn
+    fn -- "1 · understand query (JSON mode)<br/>llama-4-scout-17b" --> ai
+    fn -- "2 · embed cleaned query (1024-d)<br/>qwen3-embedding-0.6b" --> ai
+    fn -- "3 · REST v2 /entities/search or /query<br/>🔑 read-only token (server-side only)" --> coll
+
+    classDef edge fill:#fef3e8,stroke:#d97746,color:#3a2a1a;
+    classDef db fill:#eef4ff,stroke:#4a72c4,color:#1a2a3a;
+    classDef client fill:#f4f4f4,stroke:#999,color:#222;
+    class assets,fn,ai edge;
+    class coll db;
+    class spa client;
 ```
-Browser (React SPA)
-   │  POST /api/search   { q, filters, sort, limit, offset }
-   ▼
-Cloudflare Pages Function  (functions/api/search.ts)   ── same origin, no CORS
-   │  1. embed q via Workers AI  @cf/qwen/qwen3-embedding-0.6b   (1024-d)
-   │  2. Zilliz REST v2:  /entities/search (q present) or /entities/query (browse)
-   ▼
-Zilliz Cloud (Milvus)  collection `amazon_reviews_electronics`
-```
+
+> The browser holds no secrets. The `ZILLIZ_TOKEN` lives only in the Function environment,
+> so steps 1–3 all happen server-side at the edge.
 
 - **Search** (`q` non-empty): embed the query, vector-search `text_vec` (COSINE).
 - **Browse** (`q` empty): scalar query with the compiled filter.
@@ -45,6 +70,60 @@ Zilliz Cloud (Milvus)  collection `amazon_reviews_electronics`
   **read-only API key** (see [Security](#security)). The collection is built and ingested by
   this [data-generation notebook](amazon_reviews_ingest.ipynb)
   (embeds product text with Qwen3-Embedding-0.6B and images with SigLIP, then loads Milvus).
+
+### Data-generation pipeline
+
+The collection is a one-time offline build, separate from the runtime above. The notebook
+runs on a Colab T4 GPU (image download is the bottleneck, not the GPU) and checkpoints to
+Drive so the run is resumable.
+
+```mermaid
+flowchart TB
+    subgraph source["📦 Source data — McAuley Lab"]
+        meta["Amazon Reviews 2023<br/><b>meta_Electronics.jsonl.gz</b><br/><i>resumable HTTP Range download</i>"]
+        imgs["Product images<br/><i>large / hi_res URLs</i>"]
+    end
+
+    subgraph colab["🖥️ Colab T4 GPU — notebook"]
+        parse["Parse + clean each record<br/><i>price sentinels, build text string,<br/>require image · text · known price</i>"]
+        siglip["SigLIP<br/>ViT-L-16-SigLIP-256<br/><i>image → image_vec (1024-d)</i>"]
+        qwen["Qwen3-Embedding-0.6B<br/><i>title+brand+category+features+desc<br/>→ text_vec (1024-d)</i>"]
+        scalars["Filterable scalars<br/><i>price · rating · store · categories[]</i>"]
+        ckpt[("Drive checkpoint<br/><i>processed / inserted<br/>→ resume on restart</i>")]
+    end
+
+    subgraph zilliz["🗄️ Zilliz Cloud — Milvus"]
+        coll["Collection<br/><b>amazon_reviews_electronics</b><br/><i>AUTOINDEX · COSINE · normalized</i>"]
+    end
+
+    facets["scripts/build-facets.mjs<br/><i>samples collection</i>"]
+    fjson["public/facets.json<br/><i>top brands · categories · price bounds</i>"]
+
+    meta --> parse
+    parse -- "download (10 workers)" --> imgs
+    imgs --> siglip
+    parse --> qwen
+    parse --> scalars
+    siglip --> coll
+    qwen --> coll
+    scalars --> coll
+    parse -.batch flush.-> ckpt
+    coll -.->|build time| facets --> fjson
+
+    classDef src fill:#f0f0ec,stroke:#999,color:#222;
+    classDef gpu fill:#eef9f0,stroke:#3a9d5d,color:#143a22;
+    classDef db fill:#eef4ff,stroke:#4a72c4,color:#1a2a3a;
+    classDef art fill:#fef3e8,stroke:#d97746,color:#3a2a1a;
+    class meta,imgs src;
+    class parse,siglip,qwen,scalars,ckpt gpu;
+    class coll db;
+    class facets,fjson art;
+```
+
+> Each batch (`FETCH_BATCH=256`) downloads images, embeds text + images, and upserts in one
+> flush, then advances the checkpoint — so an interrupted run resumes where it left off.
+> `image_vec` is stored for the deferred "More like this" feature; the live app searches
+> `text_vec` only.
 
 ## Setup
 
