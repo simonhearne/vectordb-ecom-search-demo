@@ -1,5 +1,7 @@
 # Lumen — vector-search e-commerce demo
 
+> [Live demo site](https://5e60bf53.vdb-ecom.pages.dev/)
+
 A minimalist, Amazon-style product search UI over an existing **Zilliz Cloud (Milvus)**
 collection of Amazon electronics. Semantic search is powered by **Cloudflare Workers AI**
 query embeddings; the catalog lives in Milvus. Built as a static React SPA on **Cloudflare
@@ -41,7 +43,7 @@ Zilliz Cloud (Milvus)  collection `amazon_reviews_electronics`
   even in local dev, so it incurs usage charges). Authenticate once: `npx wrangler login`.
 - A **Zilliz Cloud** cluster hosting the `amazon_reviews_electronics` collection, and a
   **read-only API key** (see [Security](#security)). The collection is built and ingested by
-  this [data-generation notebook](https://colab.research.google.com/drive/1eNVUQKPqHz2mOXAwrz9REU5MssEuNHHn)
+  this [data-generation notebook](amazon_reviews_ingest.ipynb)
   (embeds product text with Qwen3-Embedding-0.6B and images with SigLIP, then loads Milvus).
 
 ## Setup
