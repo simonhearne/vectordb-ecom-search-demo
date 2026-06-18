@@ -8,6 +8,11 @@ export const PAGE_SIZE = 24;
 // serverless per-call limit (1024) on the server.
 export const POOL_SIZE = 250;
 
+// Default blend for hybrid (dense + BM25) query search. α = the dense/semantic weight:
+// 0 = pure keyword/BM25, 1 = pure dense vector, in-between = weighted blend. Shared with
+// the server, which uses it when a request omits `alpha`.
+export const DEFAULT_HYBRID_ALPHA = 0.6;
+
 export const REPO_URL = "https://github.com/simonhearne/vectordb-ecom-search-demo";
 
 export const SORT_OPTIONS: { key: SortKey; label: string }[] = [
