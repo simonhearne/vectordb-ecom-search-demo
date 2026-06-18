@@ -56,6 +56,7 @@ export interface SearchDebug {
   understandModel?: string; // Workers AI model used for query understanding
   limit: number;
   offset: number;
+  pool?: number; // candidate pool over-fetched and sorted (set only on scalar sorts)
   count: number;
   timings: { understandMs?: number; embedMs?: number; seedMs?: number; zillizMs: number; serverMs: number };
 }

@@ -2,6 +2,12 @@ import type { SortKey } from "./types";
 
 export const PAGE_SIZE = 24;
 
+// Sort depth: when sorting by a scalar (price/rating/reviews) the proxy over-fetches this
+// many relevance-ranked candidates, sorts them whole, and paginates within. Shared so the
+// UI can detect a truncated pool (total === POOL_SIZE) and show "N+". Capped at the Zilliz
+// serverless per-call limit (1024) on the server.
+export const POOL_SIZE = 250;
+
 export const REPO_URL = "https://github.com/simonhearne/vectordb-ecom-search-demo";
 
 export const SORT_OPTIONS: { key: SortKey; label: string }[] = [

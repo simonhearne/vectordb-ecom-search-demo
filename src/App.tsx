@@ -8,7 +8,7 @@ import type {
   SearchRequest,
   SortKey,
 } from "./lib/types";
-import { PAGE_SIZE } from "./lib/config";
+import { PAGE_SIZE, POOL_SIZE } from "./lib/config";
 import { loadFacets, search } from "./lib/searchClient";
 import { Header } from "./components/Header";
 import { FilterPanel } from "./components/FilterPanel";
@@ -52,6 +52,7 @@ export function App() {
 
   const [similarTo, setSimilarTo] = useState<Product | null>(null); // "More like this" seed
   const [results, setResults] = useState<Product[]>([]);
+  const [total, setTotal] = useState<number | null>(null); // sorted-pool size, when sorting
   const [mode, setMode] = useState<"search" | "browse" | "similar">("browse");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -112,6 +113,7 @@ export function App() {
       .then((res) => {
         if (id !== reqId.current) return;
         setResults(res.results);
+        setTotal(res.total ?? null);
         setMode(res.mode);
         setDiag({ request, response: res, clientMs: Math.round(performance.now() - started) });
 
@@ -135,6 +137,7 @@ export function App() {
         if (id !== reqId.current) return;
         setError(e instanceof Error ? e.message : String(e));
         setResults([]);
+        setTotal(null);
       })
       .finally(() => {
         if (id === reqId.current) setLoading(false);
@@ -191,19 +194,26 @@ export function App() {
     setSimilarTo(null);
   };
 
-  const hasNext = results.length === PAGE_SIZE;
+  // When sorting, the proxy returns the sorted-pool size as `total`, so pagination is bounded
+  // by it; relevance mode has no total and uses the page-full heuristic (unbounded paging).
+  const hasNext =
+    total != null ? (page + 1) * PAGE_SIZE < total : results.length === PAGE_SIZE;
 
   const summary = () => {
     if (loading) return "Searching…";
-    const n = results.length;
+    // On a sorted page, report the pool count (with "+" when the pool was truncated at the
+    // sort-depth cap); otherwise the page count (with "+" when another page follows).
+    const truncated = total != null && total >= POOL_SIZE;
+    const count = total != null ? total : results.length;
+    const plus = total != null ? (truncated ? "+" : "") : hasNext ? "+" : "";
     if (mode === "similar") {
-      return `${n}${hasNext ? "+" : ""} product${n === 1 ? "" : "s"} similar to “${similarTo?.title ?? ""}”`;
+      return `${count}${plus} product${count === 1 ? "" : "s"} similar to “${similarTo?.title ?? ""}”`;
     }
     if (mode === "search") {
-      const base = `${n}${hasNext ? "+" : ""} match${n === 1 ? "" : "es"} for “${committedQuery.trim()}”`;
-      return sort === "relevance" ? base : `${base} · re-ranked within top matches`;
+      const base = `${count}${plus} match${count === 1 ? "" : "es"} for “${committedQuery.trim()}”`;
+      return sort === "relevance" ? base : `${base} · sorted across matches`;
     }
-    return `Browsing ${n}${hasNext ? "+" : ""} product${n === 1 ? "" : "s"}`;
+    return `Browsing ${count}${plus} product${count === 1 ? "" : "s"}`;
   };
 
   return (

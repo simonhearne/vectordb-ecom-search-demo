@@ -10,6 +10,7 @@ import type {
   SearchResponse,
   SortKey,
 } from "../../src/lib/types";
+import { POOL_SIZE } from "../../src/lib/config";
 
 const MODEL = "@cf/qwen/qwen3-embedding-0.6b";
 const COLLECTION = "amazon_reviews_electronics";
@@ -40,6 +41,10 @@ const OUTPUT_FIELDS = [
 // Zilliz serverless caps (from docs): limit <= 1024, limit + offset < 16384.
 const MAX_LIMIT = 1024;
 const MAX_WINDOW = 16384;
+
+// POOL_SIZE (sort depth) is shared with the client via src/lib/config so the UI can detect
+// a truncated pool. When sorting by a scalar we over-fetch that many relevance-ranked
+// candidates, sort the whole pool, then slice the page — capped at MAX_LIMIT below.
 
 interface Env {
   AI: { run: (model: string, inputs: Record<string, unknown>) => Promise<any> };
@@ -270,6 +275,13 @@ export async function onRequestPost(ctx: Ctx): Promise<Response> {
     limit = Math.min(Math.max(1, limit), MAX_LIMIT);
     if (offset + limit > MAX_WINDOW) limit = Math.max(1, MAX_WINDOW - offset);
 
+    // Scalar sorts can't be paginated at the DB: over-fetch a relevance-ranked pool at
+    // offset 0, sort it whole, then slice the page below. Relevance keeps native, unbounded
+    // offset/limit pagination. fetchLimit/fetchOffset drive every Zilliz branch.
+    const sorted = sort !== "relevance";
+    const fetchLimit = sorted ? Math.min(POOL_SIZE, MAX_LIMIT) : limit;
+    const fetchOffset = sorted ? 0 : offset;
+
     const t0 = Date.now();
 
     // Strip filter phrases out of the query before embedding; surface the implied
@@ -329,8 +341,8 @@ export async function onRequestPost(ctx: Ctx): Promise<Response> {
       // Exclude the seed itself; fold in any manual filters from the rail.
       const exclude = `parent_asin != "${esc(seedId)}"`;
       const subFilter = filter ? `${filter} and ${exclude}` : exclude;
-      // Each sub-search must surface enough candidates to fill the requested page.
-      const subLimit = Math.min(offset + limit, MAX_LIMIT);
+      // Each sub-search must surface enough candidates to fill the requested window.
+      const subLimit = Math.min(fetchOffset + fetchLimit, MAX_LIMIT);
 
       zStart = Date.now();
       if (Array.isArray(imageVec) && imageVec.length) {
@@ -343,8 +355,8 @@ export async function onRequestPost(ctx: Ctx): Promise<Response> {
             { data: [imageVec], annsField: "image_vec", filter: subFilter, limit: subLimit },
           ],
           rerank: { strategy: "rrf", params: { k: 60 } },
-          limit,
-          offset,
+          limit: fetchLimit,
+          offset: fetchOffset,
           outputFields: OUTPUT_FIELDS,
         });
         rows = out.data ?? [];
@@ -356,8 +368,8 @@ export async function onRequestPost(ctx: Ctx): Promise<Response> {
           data: [textVec],
           annsField: "text_vec",
           filter: subFilter,
-          limit,
-          offset,
+          limit: fetchLimit,
+          offset: fetchOffset,
           outputFields: OUTPUT_FIELDS,
         });
         rows = out.data ?? [];
@@ -375,8 +387,8 @@ export async function onRequestPost(ctx: Ctx): Promise<Response> {
         data: [vector],
         annsField: ANNS_FIELD,
         ...(filter ? { filter } : {}),
-        limit,
-        offset,
+        limit: fetchLimit,
+        offset: fetchOffset,
         outputFields: OUTPUT_FIELDS,
       });
       rows = out.data ?? [];
@@ -386,17 +398,30 @@ export async function onRequestPost(ctx: Ctx): Promise<Response> {
       const out = await zilliz(env, "entities/query", {
         collectionName: COLLECTION,
         filter, // "" is accepted = browse all
-        limit,
-        offset,
+        limit: fetchLimit,
+        offset: fetchOffset,
         outputFields: OUTPUT_FIELDS,
       });
       rows = out.data ?? [];
     }
     const zillizMs = Date.now() - zStart;
 
-    const results = applySort(rows.map(toProduct), sort);
+    // Scalar sorts: order the whole over-fetched pool, then slice the requested page.
+    // `applySort` relies on Array.prototype.sort being stable (V8/Workers) so equal keys
+    // keep relevance order — load-bearing for consistent ordering across pages.
+    const pool = rows.map(toProduct);
+    let results: Product[];
+    let total: number | undefined;
+    if (sorted) {
+      const ranked = applySort(pool, sort);
+      results = ranked.slice(offset, offset + limit);
+      total = ranked.length; // candidate-pool count (capped at POOL_SIZE)
+    } else {
+      results = pool; // native relevance page, already windowed at the DB
+    }
     const payload: SearchResponse = {
       results,
+      total,
       mode,
       parsed: rawQ
         ? { applied, originalQuery: rawQ, cleanedQuery, filters: impliedFilters }
@@ -409,6 +434,7 @@ export async function onRequestPost(ctx: Ctx): Promise<Response> {
         understandModel: understood ? UNDERSTAND_MODEL : undefined,
         limit,
         offset,
+        pool: sorted ? fetchLimit : undefined,
         count: results.length,
         timings: { understandMs, embedMs, seedMs, zillizMs, serverMs: Date.now() - t0 },
       },
