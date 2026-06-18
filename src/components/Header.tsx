@@ -1,6 +1,7 @@
 import type { SortKey } from "../lib/types";
 import { SORT_OPTIONS, REPO_URL } from "../lib/config";
 import { SearchIcon, SlidersIcon, ChevronDown, XIcon, GitHubIcon } from "./icons";
+import { BlendSlider } from "./BlendSlider";
 
 function GitHubLink() {
   return (
@@ -121,6 +122,9 @@ export function Header({
   onSort,
   onOpenFilters,
   activeFilters,
+  alpha,
+  onAlpha,
+  showBlend,
 }: {
   query: string;
   onQuery: (v: string) => void;
@@ -130,6 +134,9 @@ export function Header({
   onSort: (s: SortKey) => void;
   onOpenFilters: () => void;
   activeFilters: number;
+  alpha: number;
+  onAlpha: (a: number) => void;
+  showBlend: boolean;
 }) {
   return (
     <header className="sticky top-0 z-30 border-b border-line bg-paper/85 backdrop-blur-md">
@@ -148,6 +155,11 @@ export function Header({
           <div className="hidden flex-1 md:flex">
             <SearchBar value={query} onChange={onQuery} onSubmit={onSubmit} onClear={onClear} />
           </div>
+          {showBlend && (
+            <div className="hidden w-44 md:block">
+              <BlendSlider alpha={alpha} onChange={onAlpha} />
+            </div>
+          )}
           <div className="hidden md:block">
             <SortSelect sort={sort} onSort={onSort} />
           </div>

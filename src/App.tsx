@@ -8,9 +8,10 @@ import type {
   SearchRequest,
   SortKey,
 } from "./lib/types";
-import { PAGE_SIZE, POOL_SIZE } from "./lib/config";
+import { PAGE_SIZE, POOL_SIZE, DEFAULT_HYBRID_ALPHA } from "./lib/config";
 import { loadFacets, search } from "./lib/searchClient";
 import { Header } from "./components/Header";
+import { BlendSlider } from "./components/BlendSlider";
 import { FilterPanel } from "./components/FilterPanel";
 import { ProductGrid } from "./components/ProductGrid";
 import { Pagination } from "./components/Pagination";
@@ -47,6 +48,9 @@ export function App() {
   const [committedQuery, setCommittedQuery] = useState(""); // the submitted query that drives search
   const [filters, setFilters] = useState<Filters>({});
   const [sort, setSort] = useState<SortKey>("relevance");
+  // Dense/semantic blend (α): a global relevance preference that persists across queries,
+  // "More like this", and clear — only sent (and shown) in search mode.
+  const [alpha, setAlpha] = useState(DEFAULT_HYBRID_ALPHA);
   const [page, setPage] = useState(0);
   const [nonce, setNonce] = useState(0);
 
@@ -77,7 +81,7 @@ export function App() {
   // Reset to first page whenever the committed query, similar seed, filters, or sort change.
   useEffect(() => {
     setPage(0);
-  }, [committedQuery, similarTo, filters, sort]);
+  }, [committedQuery, similarTo, filters, sort, alpha]);
 
   // Fetch on any input change. reqId guards against out-of-order responses.
   useEffect(() => {
@@ -107,6 +111,8 @@ export function App() {
           limit: PAGE_SIZE,
           offset: page * PAGE_SIZE,
           understand,
+          // Blend only applies to a real query search (BM25 needs query text); omit for browse.
+          ...(rawQ !== "" ? { alpha } : {}),
         };
     const started = performance.now();
     search(request)
@@ -142,7 +148,7 @@ export function App() {
       .finally(() => {
         if (id === reqId.current) setLoading(false);
       });
-  }, [committedQuery, similarTo, filters, sort, page, nonce]);
+  }, [committedQuery, similarTo, filters, sort, alpha, page, nonce]);
 
   const patch = (p: Partial<Filters>) => setFilters((prev) => ({ ...prev, ...p }));
   const clearFilters = () => {
@@ -199,6 +205,9 @@ export function App() {
   const hasNext =
     total != null ? (page + 1) * PAGE_SIZE < total : results.length === PAGE_SIZE;
 
+  // The blend control is only meaningful in search mode (a committed query, not similarity).
+  const showBlend = committedQuery.trim() !== "" && !similarTo;
+
   const summary = () => {
     if (loading) return "Searching…";
     // On a sorted page, report the pool count (with "+" when the pool was truncated at the
@@ -227,6 +236,9 @@ export function App() {
         onSort={setSort}
         onOpenFilters={() => setDrawerOpen(true)}
         activeFilters={activeFilters}
+        alpha={alpha}
+        onAlpha={setAlpha}
+        showBlend={showBlend}
       />
 
       <main className="mx-auto max-w-[1400px] px-4 py-6 sm:px-6 lg:py-10">
@@ -307,6 +319,11 @@ export function App() {
               </button>
             </div>
             <div className="flex-1 overflow-y-auto px-5 py-2">
+              {showBlend && (
+                <div className="mb-4 border-b border-line pb-4 pt-2">
+                  <BlendSlider alpha={alpha} onChange={setAlpha} />
+                </div>
+              )}
               {facets && <FilterPanel facets={facets} filters={filters} onChange={patch} />}
             </div>
             <div className="flex gap-3 border-t border-line px-5 py-4">

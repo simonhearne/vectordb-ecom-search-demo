@@ -24,6 +24,7 @@ export interface SearchRequest {
   offset?: number;
   understand?: boolean; // run NL query understanding on q (default true when q present)
   similarTo?: string; // parent_asin — "More like this": seed similarity from a product's stored vectors
+  alpha?: number; // dense/semantic weight 0..1 for hybrid search (defaults to DEFAULT_HYBRID_ALPHA server-side)
 }
 
 // Result of natural-language query understanding on the proxy.
@@ -45,7 +46,7 @@ export interface Product {
   categories?: string[];
   image_url?: string;
   text_snippet?: string;
-  score?: number; // cosine similarity from vector search (relevance only)
+  score?: number; // relevance score; meaning varies by strategy (cosine for dense, BM25 for sparse, fused for weighted)
 }
 
 export interface SearchDebug {
@@ -57,6 +58,8 @@ export interface SearchDebug {
   limit: number;
   offset: number;
   pool?: number; // candidate pool over-fetched and sorted (set only on scalar sorts)
+  alpha?: number; // resolved dense/semantic weight 0..1 (search mode)
+  strategy?: "dense" | "sparse" | "weighted"; // active blend strategy (search mode)
   count: number;
   timings: { understandMs?: number; embedMs?: number; seedMs?: number; zillizMs: number; serverMs: number };
 }

@@ -30,11 +30,11 @@ flowchart TB
     end
 
     subgraph zilliz["🗄️ Zilliz Cloud — Milvus"]
-        coll["Collection<br/><b>amazon_reviews_electronics</b><br/><i>text_vec · image_vec · scalars</i>"]
+        coll["Collection<br/><b>amazon_reviews</b><br/><i>text_vec · image_vec · text_sparse (BM25) · scalars</i>"]
     end
 
     spa -- "GET / (load app)" --> assets
-    spa -- "POST /api/search<br/>{ q, filters, sort, limit, offset }" --> fn
+    spa -- "POST /api/search<br/>{ q, filters, sort, alpha, limit, offset }" --> fn
     fn -- "1 · understand query (JSON mode)<br/>llama-4-scout-17b" --> ai
     fn -- "2 · embed cleaned query (1024-d)<br/>qwen3-embedding-0.6b" --> ai
     fn -- "3 · REST v2 /entities/search or /query<br/>🔑 read-only token (server-side only)" --> coll
@@ -50,7 +50,10 @@ flowchart TB
 > The browser holds no secrets. The `ZILLIZ_TOKEN` lives only in the Function environment,
 > so steps 1–3 all happen server-side at the edge.
 
-- **Search** (`q` non-empty): embed the query, vector-search `text_vec` (COSINE).
+- **Search** (`q` non-empty): a tunable **hybrid** of dense vector relevance (`text_vec`,
+  COSINE) and **BM25 lexical** scoring (`text_sparse`), blended by a weight α you control
+  with the *Relevance blend* slider (Keyword ↔ Semantic). At the extremes it collapses to
+  pure keyword or pure vector search. See [Hybrid search](#hybrid-search-dense--bm25).
 - **Browse** (`q` empty): scalar query with the compiled filter.
 - **Query understanding**: a NL query like *"remote control under $10"* is parsed by Workers
   AI (JSON mode) into a cleaned embedding query (*"remote control"*) plus implied numeric
@@ -68,8 +71,9 @@ flowchart TB
 - Node 20+ and npm.
 - A **Cloudflare account** with Workers AI (the `[ai]` binding proxies to real Workers AI
   even in local dev, so it incurs usage charges). Authenticate once: `npx wrangler login`.
-- A **Zilliz Cloud** cluster hosting the `amazon_reviews_electronics` collection, and a
-  **read-only API key** (see [Security](#security)). The collection is built and ingested by
+- A **Zilliz Cloud** cluster hosting the `amazon_reviews` collection (with a `text_sparse`
+  BM25 function field over `text_snippet`), and a **read-only API key** (see
+  [Security](#security)). The collection is built and ingested by
   this [data-generation notebook](amazon_reviews_ingest.ipynb)
   (embeds product text with Qwen3-Embedding-0.6B and images with SigLIP, then loads Milvus).
 
@@ -95,7 +99,7 @@ flowchart TB
     end
 
     subgraph zilliz["🗄️ Zilliz Cloud — Milvus"]
-        coll["Collection<br/><b>amazon_reviews_electronics</b><br/><i>AUTOINDEX · COSINE · normalized</i>"]
+        coll["Collection<br/><b>amazon_reviews</b><br/><i>AUTOINDEX · COSINE · normalized<br/>+ text_sparse (BM25 function)</i>"]
     end
 
     facets["scripts/build-facets.mjs<br/><i>samples collection</i>"]
@@ -259,11 +263,39 @@ filters, so phrases like "under $10" shape the *filter* instead of polluting the
 > `mistral-7b`) were deprecated 2026-05-30; `llama-3.3-70b-instruct-fp8-fast` is accurate but
 > far too slow (~60s); smaller models dropped constraints on ranges.
 
+## Hybrid search (dense + BM25)
+
+Query search blends two retrieval signals over the same collection and lets the user dial the
+balance:
+
+- **Dense / semantic** — the embedded query against `text_vec` (COSINE). Good at meaning and
+  paraphrase ("earphones" finds "earbuds").
+- **Lexical / keyword** — BM25 against `text_sparse`, a sparse vector Milvus computes at
+  insert time via a BM25 **function** over the analyzer-enabled `text_snippet`. Good at exact
+  tokens, model numbers, and brand names.
+
+A single weight **α ∈ [0,1]** (the *Relevance blend* slider, **Keyword ↔ Semantic**;
+`DEFAULT_HYBRID_ALPHA = 0.6`) drives the proxy:
+
+- **α = 1** → pure dense `entities/search` on `text_vec`.
+- **α = 0** → pure BM25 `entities/search` on `text_sparse` (the raw query text is the query;
+  the embedding call is skipped entirely — faster and cheaper).
+- **0 < α < 1** → `entities/hybrid_search` fusing both sub-searches with a **weighted**
+  reranker, `weights: [α, 1 − α]` and `norm_score: true`. The normalization is essential:
+  raw BM25 scores (~10) otherwise dwarf cosine (~1), so without it the slider wouldn't behave
+  linearly.
+
+The slider shows only while searching (not in browse / "More like this"); α persists as a
+global preference, and changing it refetches without re-running query understanding. The
+diagnostics panel reports the resolved `strategy` and `α`. (Note: "More like this" uses its
+own separate `text_vec + image_vec` RRF blend — α does not apply there.)
+
 ## Project layout
 
 | Path | Purpose |
 | --- | --- |
-| `functions/api/search.ts` | Pages Function proxy: embed + search/browse, filter compile, sort, clamp |
+| `functions/api/search.ts` | Pages Function proxy: embed + hybrid/search/browse, filter compile, sort, clamp |
+| `src/components/BlendSlider.tsx` | Dense↔keyword *Relevance blend* slider (α) |
 | `src/lib/searchClient.ts` | Single front-end DB seam (calls `/api/search`) |
 | `src/lib/types.ts` | Shared request/response contract |
 | `scripts/build-facets.mjs` | Samples the collection → `public/facets.json` |

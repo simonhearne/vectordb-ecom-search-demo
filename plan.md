@@ -1,5 +1,11 @@
 # Build: minimalist Amazon-style vector-search app on Cloudflare (Pages + Workers AI proxy)
 
+> **Historical kickoff plan.** This is the original MVP build spec. The app has since moved to
+> the `amazon_reviews` collection (with a `text_sparse` BM25 function field) and added tunable
+> hybrid dense+BM25 search. For current behavior see `CLAUDE.md`, `README.md`, and
+> `docs/superpowers/specs/2026-06-18-hybrid-search-bm25-design.md`. Note also: `price` actually
+> contains `-1` sentinels for unknown prices despite the "unknowns excluded" claim below.
+
 Build a minimalist e-commerce search UI replicating Amazon's core UX (search box,
 faceted filters, sort) over an existing Zilliz Cloud (Milvus) collection.
 Architecture is committed:

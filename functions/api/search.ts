@@ -10,10 +10,10 @@ import type {
   SearchResponse,
   SortKey,
 } from "../../src/lib/types";
-import { POOL_SIZE } from "../../src/lib/config";
+import { POOL_SIZE, DEFAULT_HYBRID_ALPHA } from "../../src/lib/config";
 
 const MODEL = "@cf/qwen/qwen3-embedding-0.6b";
-const COLLECTION = "amazon_reviews_electronics";
+const COLLECTION = "amazon_reviews";
 const ANNS_FIELD = "text_vec";
 // Chosen in STEP 0: the instruction-prefixed `queries` form aligns NL queries with the
 // plain-embedded documents and gives clean ranking (parity 6/6, mean cosine ~0.87).
@@ -269,6 +269,8 @@ export async function onRequestPost(ctx: Ctx): Promise<Response> {
     const rawQ = (body.q ?? "").trim();
     const seedId = (body.similarTo ?? "").trim();
     const sort: SortKey = body.sort ?? "relevance";
+    // Dense/semantic weight for hybrid search: 0 = pure BM25, 1 = pure dense. Clamp to [0,1].
+    const alpha = Math.min(1, Math.max(0, typeof body.alpha === "number" ? body.alpha : DEFAULT_HYBRID_ALPHA));
 
     const offset = Math.max(0, Math.floor(body.offset ?? 0));
     let limit = Math.floor(body.limit ?? 24);
@@ -319,6 +321,7 @@ export async function onRequestPost(ctx: Ctx): Promise<Response> {
     let embedDim: number | undefined;
     let seedMs: number | undefined;
     let annsField: string | undefined;
+    let strategy: "dense" | "sparse" | "weighted" | undefined;
     let zStart: number;
 
     if (seedId) {
@@ -376,22 +379,69 @@ export async function onRequestPost(ctx: Ctx): Promise<Response> {
       }
     } else if (rawQ) {
       mode = "search";
-      annsField = ANNS_FIELD;
-      const te = Date.now();
-      const vector = await embedQuery(env, cleanedQuery);
-      embedMs = Date.now() - te;
-      embedDim = vector.length;
-      zStart = Date.now();
-      const out = await zilliz(env, "entities/search", {
-        collectionName: COLLECTION,
-        data: [vector],
-        annsField: ANNS_FIELD,
-        ...(filter ? { filter } : {}),
-        limit: fetchLimit,
-        offset: fetchOffset,
-        outputFields: OUTPUT_FIELDS,
-      });
-      rows = out.data ?? [];
+      // Tunable blend of dense (text_vec) + BM25 lexical (text_sparse). Dispatch on alpha:
+      // alpha>=1 pure dense, alpha<=0 pure BM25 (skips embedding), else weighted hybrid.
+      if (alpha <= 0) {
+        // Pure BM25: Milvus applies the analyzer + BM25 function to the raw query text.
+        // No embedding call (latency/cost win) — embedMs/embedDim stay undefined.
+        strategy = "sparse";
+        annsField = "text_sparse";
+        zStart = Date.now();
+        const out = await zilliz(env, "entities/search", {
+          collectionName: COLLECTION,
+          data: [cleanedQuery],
+          annsField: "text_sparse",
+          ...(filter ? { filter } : {}),
+          limit: fetchLimit,
+          offset: fetchOffset,
+          outputFields: OUTPUT_FIELDS,
+        });
+        rows = out.data ?? [];
+      } else if (alpha >= 1) {
+        // Pure dense vector search.
+        strategy = "dense";
+        annsField = ANNS_FIELD;
+        const te = Date.now();
+        const vector = await embedQuery(env, cleanedQuery);
+        embedMs = Date.now() - te;
+        embedDim = vector.length;
+        zStart = Date.now();
+        const out = await zilliz(env, "entities/search", {
+          collectionName: COLLECTION,
+          data: [vector],
+          annsField: ANNS_FIELD,
+          ...(filter ? { filter } : {}),
+          limit: fetchLimit,
+          offset: fetchOffset,
+          outputFields: OUTPUT_FIELDS,
+        });
+        rows = out.data ?? [];
+      } else {
+        // Weighted hybrid: dense + BM25 sub-searches fused by a weighted reranker. The
+        // dense sub-search MUST be first so weights[0]=alpha applies to it (positional).
+        // norm_score min-max normalizes each sub-search to [0,1] so weights are linear.
+        strategy = "weighted";
+        annsField = `text_vec + text_sparse (weighted α=${alpha})`;
+        const te = Date.now();
+        const vector = await embedQuery(env, cleanedQuery);
+        embedMs = Date.now() - te;
+        embedDim = vector.length;
+        // Each sub-search must surface enough candidates to fill the requested window.
+        const subLimit = Math.min(fetchOffset + fetchLimit, MAX_LIMIT);
+        zStart = Date.now();
+        const out = await zilliz(env, "entities/hybrid_search", {
+          collectionName: COLLECTION,
+          search: [
+            { data: [vector], annsField: "text_vec", ...(filter ? { filter } : {}), limit: subLimit },
+            { data: [cleanedQuery], annsField: "text_sparse", ...(filter ? { filter } : {}), limit: subLimit },
+          ],
+          rerank: { strategy: "weighted", params: { weights: [alpha, 1 - alpha], norm_score: true } },
+          limit: fetchLimit,
+          offset: fetchOffset,
+          outputFields: OUTPUT_FIELDS,
+        });
+        rows = out.data ?? [];
+      }
     } else {
       mode = "browse";
       zStart = Date.now();
@@ -435,6 +485,8 @@ export async function onRequestPost(ctx: Ctx): Promise<Response> {
         limit,
         offset,
         pool: sorted ? fetchLimit : undefined,
+        alpha: mode === "search" ? alpha : undefined,
+        strategy,
         count: results.length,
         timings: { understandMs, embedMs, seedMs, zillizMs, serverMs: Date.now() - t0 },
       },

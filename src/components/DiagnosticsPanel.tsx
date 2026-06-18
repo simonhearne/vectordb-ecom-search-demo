@@ -54,6 +54,16 @@ export function DiagnosticsPanel({ diag }: { diag: Diagnostics }) {
             />
             <Metric label="Results returned" value={d?.count ?? response.results.length} />
             <Metric label="ANNS field" value={d?.annsField ?? "—"} />
+            <Metric
+              label="Blend"
+              value={
+                d?.strategy
+                  ? d.strategy === "weighted"
+                    ? `weighted (α=${(d.alpha ?? 0).toFixed(2)})`
+                    : d.strategy
+                  : "—"
+              }
+            />
             <Metric label="Embedding dim" value={d?.embedDim ?? "—"} />
             <Metric label="Understanding" value={d?.understandModel ?? "off / not run"} mono />
             <Metric

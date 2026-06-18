@@ -12,7 +12,7 @@ import { dirname, join } from "node:path";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
 
-const COLLECTION = "amazon_reviews_electronics";
+const COLLECTION = "amazon_reviews";
 const SAMPLE_SIZE = 10000; // rows to sample (paged; serverless window limit is 16384)
 const PAGE = 1000;
 const TOP_BRANDS = 40;

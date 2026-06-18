@@ -31,11 +31,15 @@ sees the DB key and never calls Zilliz directly.
 - Workers AI: `[ai]` binding `AI` in `wrangler.toml`. The binding proxies to real Workers
   AI **even in local dev** (incurs charges).
 
-## Collection — `amazon_reviews_electronics` (Zilliz Serverless, AWS eu-central-1)
+## Collection — `amazon_reviews` (Zilliz Serverless, AWS eu-central-1)
 PK `parent_asin` (VARCHAR). Scalars: `title`, `main_category`, `store` (brand),
 `price` (FLOAT USD), `average_rating`, `rating_number`, `categories` (ARRAY<VARCHAR>),
-`image_url`, `text_snippet`. Vectors (1024-d, COSINE, normalized): `text_vec`
-(query-time), `image_vec` (stored only). **Do NOT rebuild the collection.**
+`image_url`, `text_snippet` (analyzer-enabled, feeds BM25). Vectors (1024-d, COSINE,
+normalized): `text_vec` (query-time), `image_vec` (stored only). Plus a `text_sparse`
+`SparseFloatVector` produced by the `text_snippet_bm25` BM25 **function** over `text_snippet`
+— this powers lexical/keyword search and the hybrid blend. ~66k rows.
+**Do NOT rebuild the collection.** (The earlier `amazon_reviews_electronics` collection —
+no sparse field — still exists but is no longer used by the app.)
 
 ⚠️ **Data note:** `price` contains `-1` sentinels for unknown prices (despite the spec
 saying unknowns were excluded). Treat `price <= 0` as "no price": hide on card, exclude
@@ -53,11 +57,12 @@ from price filter, sort last on price sorts. Helper: `hasPrice()` in `src/lib/ty
   `Authorization: Bearer <token>`. Serverless caps: `limit ≤ 1024`, `limit+offset < 16384`.
 
 ## Layout
-- `functions/api/search.ts` — proxy: `POST /api/search` (vector search when `q`; "More
-  like this" similarity when `similarTo`; scalar browse otherwise). `understandQuery()` runs
-  NL query understanding; `compileFilter()` builds the Milvus expr (escaped); `applySort()`
-  reorders the retrieved window. Response includes `parsed` (interpretation) and a `debug`
-  block (compiled filter, embed dim, timing breakdown) consumed by the diagnostics panel.
+- `functions/api/search.ts` — proxy: `POST /api/search` (search when `q` — tunable hybrid
+  dense+BM25 blend, see below; "More like this" similarity when `similarTo`; scalar browse
+  otherwise). `understandQuery()` runs NL query understanding; `compileFilter()` builds the
+  Milvus expr (escaped); `applySort()` reorders the retrieved window. Response includes
+  `parsed` (interpretation) and a `debug` block (compiled filter, embed dim, blend
+  strategy/α, timing breakdown) consumed by the diagnostics panel.
 - `src/components/DiagnosticsPanel.tsx` — collapsible panel beneath the results showing the
   query, compiled filter, window, latency (client round-trip + server understand/embed/
   zilliz), and raw results JSON.
@@ -71,8 +76,31 @@ from price filter, sort last on price sorts. Helper: `hasPrice()` in `src/lib/ty
   "More like this" reuses it with `similarTo`).
 - `src/lib/types.ts` — shared request/response contract (imported by both sides).
 - `scripts/build-facets.mjs` → `public/facets.json` (top brands/categories/price bounds).
-- `src/components/` — Header (search + Search button + sort), FilterPanel, ProductGrid/Card,
-  Pagination, Stars, States, icons.
+- `src/components/` — Header (search + Search button + blend slider + sort), BlendSlider
+  (the dense↔keyword relevance slider), FilterPanel, ProductGrid/Card, Pagination, Stars,
+  States, icons.
+
+## Hybrid search (dense + BM25)
+Query search blends **dense** vector relevance (`text_vec`) with **BM25 lexical** scoring
+(`text_sparse`), controlled by a single weight **α ∈ [0,1] = dense/semantic weight**
+(`DEFAULT_HYBRID_ALPHA = 0.6` in `src/lib/config.ts`, shared client/server; sent as
+`SearchRequest.alpha`). The proxy dispatches on α (clamped) in the search branch:
+- **α ≥ 1** → pure dense `entities/search` on `text_vec` (embedded cleaned query).
+- **α ≤ 0** → pure BM25 `entities/search` on `text_sparse` with `data:[cleanedQuery]` (raw
+  text; Milvus applies the analyzer + BM25 function). **Skips the embedding call** entirely.
+- **0 < α < 1** → `entities/hybrid_search`: dense sub-search **first** + sparse sub-search,
+  `rerank:{strategy:"weighted",params:{weights:[α,1−α],norm_score:true}}`. `norm_score:true`
+  is load-bearing — without it raw BM25 (~9.6) swamps cosine (~1) and the weights aren't
+  linear. Sub-search order is positional: dense first so `weights[0]=α` applies to it.
+
+The compiled `filter` applies to every branch/sub-search; the POOL_SIZE over-fetch→sort→slice
+path is unchanged (the blended set is the candidate pool). UI: `BlendSlider` (labels
+Keyword↔Semantic) shows **only in search mode** (a committed query, not browse/similar) — on
+desktop beside Sort, on mobile in the filter drawer. α persists across queries / "More like
+this" / clear (a global preference). Changing α refetches + resets to page 0 but does **not**
+re-run query understanding (query text is unchanged). `debug.strategy`/`debug.alpha` surface
+the resolved blend. NB: "More like this" keeps its own separate `text_vec + image_vec` RRF
+blend (below) — α does not apply there.
 
 ## Query understanding
 NL queries like "remote control under $10" are parsed by the proxy via Workers AI JSON mode
