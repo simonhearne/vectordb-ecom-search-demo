@@ -17,13 +17,15 @@ export function BlendSlider({
   className?: string;
 }) {
   const [local, setLocal] = useState(alpha);
+  const [dragging, setDragging] = useState(false);
 
   // Adopt external changes (e.g. a reset elsewhere) only while not mid-drag.
   useEffect(() => {
-    setLocal(alpha);
-  }, [alpha]);
+    if (!dragging) setLocal(alpha);
+  }, [alpha, dragging]);
 
   const commit = () => {
+    setDragging(false);
     if (local !== alpha) onChange(local);
   };
 
@@ -42,6 +44,7 @@ export function BlendSlider({
         step={0.05}
         value={local}
         onChange={(e) => setLocal(Number(e.target.value))}
+        onPointerDown={() => setDragging(true)}
         onPointerUp={commit}
         onKeyUp={commit}
         onBlur={commit}
