@@ -14,7 +14,7 @@ function Metric({ label, value, mono }: { label: string; value: React.ReactNode;
 const ms = (v?: number) => (typeof v === "number" ? `${v} ms` : "—");
 
 export function DiagnosticsPanel({ diag }: { diag: Diagnostics }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(true);
   const { request, response, clientMs } = diag;
   const d = response.debug;
   const parsed = response.parsed;
