@@ -245,7 +245,11 @@ function applySort(results: Product[], sort: SortKey): Product[] {
     case "price_desc":
       return r.sort((a, b) => priceKeyDesc(b) - priceKeyDesc(a));
     case "rating":
-      return r.sort((a, b) => (b.average_rating ?? 0) - (a.average_rating ?? 0));
+      return r.sort(
+        (a, b) =>
+          (b.average_rating ?? 0) - (a.average_rating ?? 0) ||
+          (b.rating_number ?? 0) - (a.rating_number ?? 0),
+      );
     case "reviews":
       return r.sort((a, b) => (b.rating_number ?? 0) - (a.rating_number ?? 0));
     case "relevance":
