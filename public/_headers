@@ -1,3 +1,7 @@
 # Keep this demo out of search indexes (applies to every response, incl. /api).
 /*
   X-Robots-Tag: noindex, nofollow, noarchive, nosnippet, noimageindex
+
+# Warm up connections to the image CDN and Google Fonts before the HTML is parsed.
+/
+  Link: <https://m.media-amazon.com>; rel=preconnect, <https://fonts.googleapis.com>; rel=preconnect, <https://fonts.gstatic.com>; rel=preconnect; crossorigin
