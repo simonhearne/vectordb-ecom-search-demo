@@ -45,7 +45,6 @@ function SearchBar({
           type="search"
           value={value}
           onChange={(e) => onChange(e.target.value)}
-          placeholder="Search electronics — try “headphones for kids with at least 4 stars under $60”"
           aria-label="Search products"
           className="w-full rounded-full border border-line bg-surface py-2.5 pl-11 pr-10 text-[0.95rem] text-ink placeholder:text-faint shadow-sm transition-colors focus:border-accent focus:outline-none"
         />

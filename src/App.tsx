@@ -31,6 +31,9 @@ function mergeImplied(prev: Filters, implied: Filters): Filters {
   return prev;
 }
 
+// The homepage runs this query on first load instead of an empty browse.
+const DEFAULT_QUERY = "pink headphones for kids with ears under $20";
+
 function countActive(f: Filters): number {
   let n = 0;
   if (f.priceMin != null) n++;
@@ -44,8 +47,8 @@ function countActive(f: Filters): number {
 
 export function App() {
   const [facets, setFacets] = useState<Facets | null>(null);
-  const [query, setQuery] = useState(""); // search box text (not yet submitted)
-  const [committedQuery, setCommittedQuery] = useState(""); // the submitted query that drives search
+  const [query, setQuery] = useState(DEFAULT_QUERY); // search box text (not yet submitted)
+  const [committedQuery, setCommittedQuery] = useState(DEFAULT_QUERY); // the submitted query that drives search
   const [filters, setFilters] = useState<Filters>({});
   const [sort, setSort] = useState<SortKey>("relevance");
   // Dense/semantic blend (α): a global relevance preference that persists across queries,

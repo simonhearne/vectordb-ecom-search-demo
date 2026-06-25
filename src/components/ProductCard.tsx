@@ -52,7 +52,7 @@ export function ProductCard({
             type="button"
             onClick={() => onMoreLikeThis(p)}
             title="Find similar products"
-            className="absolute bottom-3 right-3 flex items-center gap-1.5 rounded-full bg-surface/90 px-3 py-1.5 text-[11px] font-semibold text-ink opacity-0 shadow-sm backdrop-blur-sm transition-all duration-200 hover:bg-ink hover:text-paper focus-visible:opacity-100 group-hover:opacity-100"
+            className="absolute bottom-3 right-3 flex cursor-pointer items-center gap-1.5 rounded-full bg-surface/90 px-3 py-1.5 text-[11px] font-semibold text-ink opacity-0 shadow-sm backdrop-blur-sm transition-all duration-200 hover:bg-ink hover:text-paper focus-visible:opacity-100 group-hover:opacity-100"
           >
             <SimilarIcon className="h-3.5 w-3.5" />
             More like this
