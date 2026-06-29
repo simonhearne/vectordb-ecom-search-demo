@@ -52,7 +52,21 @@ interface Env {
   ZILLIZ_TOKEN: string;
 }
 
-type Ctx = { request: Request; env: Env };
+// Pages Functions provide `waitUntil` on the event context; optional so a missing one
+// (some local-dev shims) degrades to awaiting the cache write.
+type Ctx = {
+  request: Request;
+  env: Env;
+  waitUntil?: (promise: Promise<unknown>) => void;
+};
+
+// Edge cache: the whole pipeline is deterministic for a given input (static collection,
+// temperature:0 understanding), so we cache the full response keyed by a hash of the
+// normalized request body. 1-hour TTL; entirely best-effort (any Cache API failure falls
+// through to a live run).
+const CACHE_TTL = 86400; // seconds
+// Synthetic key base — POSTs aren't cacheable, so we key on a canonical GET URL.
+const CACHE_KEY_BASE = "https://cache.vdb-ecom/api/search";
 
 const isNum = (v: unknown): v is number =>
   typeof v === "number" && Number.isFinite(v);
@@ -262,14 +276,114 @@ const priceKey = (p: Product) =>
 const priceKeyDesc = (p: Product) =>
   p.price && p.price > 0 ? p.price : Number.NEGATIVE_INFINITY;
 
+// Canonical filters for the cache key: fixed key order + sorted brands so two semantically
+// equivalent filter objects (different key order, reordered brands) hash to one entry.
+function canonicalFilters(f: Filters = {}): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (isNum(f.priceMin)) out.priceMin = f.priceMin;
+  if (isNum(f.priceMax)) out.priceMax = f.priceMax;
+  if (isNum(f.minRating)) out.minRating = f.minRating;
+  if (isNum(f.minReviews)) out.minReviews = f.minReviews;
+  if (f.brands?.length) out.brands = [...f.brands].sort();
+  if (f.category) out.category = f.category;
+  return out;
+}
+
+// Reduce a request to its determinant fields, applying the same defaults/clamping the
+// handler uses, so equivalent requests collide on one cache entry.
+function normalizeForKey(body: SearchRequest): Record<string, unknown> {
+  const alpha = Math.min(
+    1,
+    Math.max(0, typeof body.alpha === "number" ? body.alpha : DEFAULT_HYBRID_ALPHA),
+  );
+  const limit = Math.min(Math.max(1, Math.floor(body.limit ?? 24)), MAX_LIMIT);
+  return {
+    q: (body.q ?? "").trim(),
+    similarTo: (body.similarTo ?? "").trim(),
+    sort: body.sort ?? "relevance",
+    alpha,
+    offset: Math.max(0, Math.floor(body.offset ?? 0)),
+    limit,
+    understand: body.understand !== false,
+    filters: canonicalFilters(body.filters),
+  };
+}
+
+// Build the synthetic GET key: SHA-256 of the normalized body, hex-encoded into the URL.
+async function cacheKeyFor(body: SearchRequest): Promise<string> {
+  const normalized = JSON.stringify(normalizeForKey(body));
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(normalized),
+  );
+  const hex = [...new Uint8Array(digest)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  return `${CACHE_KEY_BASE}?k=${hex}`;
+}
+
 export async function onRequestPost(ctx: Ctx): Promise<Response> {
   const { env } = ctx;
-  try {
-    if (!env.ZILLIZ_ENDPOINT || !env.ZILLIZ_TOKEN) {
-      return json({ error: "Server missing ZILLIZ_ENDPOINT / ZILLIZ_TOKEN." }, 500);
-    }
+  if (!env.ZILLIZ_ENDPOINT || !env.ZILLIZ_TOKEN) {
+    return json({ error: "Server missing ZILLIZ_ENDPOINT / ZILLIZ_TOKEN." }, 500);
+  }
 
-    const body = (await ctx.request.json()) as SearchRequest;
+  let body: SearchRequest;
+  try {
+    body = (await ctx.request.json()) as SearchRequest;
+  } catch (e: any) {
+    return json({ error: String(e?.message ?? e) }, 502);
+  }
+
+  // Cache lookup — best-effort. A miss (or any Cache API error, e.g. local wrangler where
+  // the Cache API can be a no-op) just falls through to a live pipeline run.
+  let cache: Cache | undefined;
+  let key: string | undefined;
+  try {
+    // `caches.default` is a Cloudflare extension; the DOM `CacheStorage` type omits it.
+    cache = (caches as unknown as { default: Cache }).default;
+    key = await cacheKeyFor(body);
+    const hit = await cache.match(key);
+    if (hit) {
+      const res = new Response(hit.body, hit);
+      res.headers.set("x-cache", "HIT");
+      return res;
+    }
+  } catch (e: any) {
+    console.error("cache lookup failed:", e?.message ?? e);
+    cache = undefined;
+  }
+
+  const res = await runSearch(env, body);
+
+  // Only successful responses are cached; 500/502 are never written.
+  if (cache && key && res.status === 200) {
+    try {
+      const cloned = res.clone();
+      const headers = new Headers(cloned.headers);
+      headers.set("Cache-Control", `public, max-age=${CACHE_TTL}`);
+      const toStore = new Response(cloned.body, {
+        status: cloned.status,
+        statusText: cloned.statusText,
+        headers,
+      });
+      const stored = cache.put(key, toStore);
+      // Storing must never block (or fail) the response.
+      if (ctx.waitUntil) ctx.waitUntil(stored);
+      else await stored;
+    } catch (e: any) {
+      console.error("cache store failed:", e?.message ?? e);
+    }
+    res.headers.set("x-cache", "MISS");
+  }
+
+  return res;
+}
+
+// Runs the full search/browse/similar pipeline for a parsed request body. Returns a 200
+// payload, or a 502 on any failure (caller decides whether to cache).
+async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
+  try {
     const rawQ = (body.q ?? "").trim();
     const seedId = (body.similarTo ?? "").trim();
     const sort: SortKey = body.sort ?? "relevance";

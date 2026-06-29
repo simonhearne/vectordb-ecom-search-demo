@@ -15,7 +15,7 @@ export function SimilarNote({
         <SimilarIcon className="h-4 w-4" />
       </span>
       <div className="flex-1 text-muted">
-        Showing products similar to{" "}
+        Showing products visually similar to{" "}
         <span className="font-medium text-ink">“{product.title}”</span>
       </div>
       <button
