@@ -60,6 +60,7 @@ export interface SearchDebug {
   pool?: number; // candidate pool over-fetched and sorted (set only on scalar sorts)
   alpha?: number; // resolved dense/semantic weight 0..1 (search mode)
   strategy?: "dense" | "sparse" | "weighted"; // active blend strategy (search mode)
+  pymilvusQuery?: string; // the effective pymilvus call equivalent to the REST request issued
   count: number;
   timings: { understandMs?: number; embedMs?: number; seedMs?: number; zillizMs: number; serverMs: number };
 }

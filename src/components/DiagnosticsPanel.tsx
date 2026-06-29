@@ -85,6 +85,15 @@ export function DiagnosticsPanel({ diag }: { diag: Diagnostics }) {
             </pre>
           </div>
 
+          {d?.pymilvusQuery && (
+            <div className="mt-5">
+              <span className="eyebrow">Effective pymilvus query</span>
+              <pre className="mt-1.5 overflow-x-auto rounded-lg bg-paper px-3 py-2.5 font-mono text-xs leading-relaxed text-ink whitespace-pre">
+                {d.pymilvusQuery}
+              </pre>
+            </div>
+          )}
+
           <details className="mt-5 group">
             <summary className="eyebrow cursor-pointer select-none list-none">
               <span className="inline-flex items-center gap-1.5">

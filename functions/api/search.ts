@@ -90,6 +90,82 @@ function compileFilter(f: Filters = {}): string {
   return clauses.join(" and ");
 }
 
+// --- Effective pymilvus query rendering ----------------------------------------------
+// The proxy talks Zilliz REST v2, but the diagnostics panel shows the equivalent pymilvus
+// (MilvusClient) call so the active search is legible as code. These builders mirror — and
+// are driven by — the exact params handed to each REST branch below.
+
+// Trim float noise (e.g. 1 - 0.7 -> 0.30000000000000004) for readable weights.
+const pyNum = (n: number) => String(Number(n.toFixed(4)));
+
+// Python string literal for arbitrary text (data values, comments).
+const pyStr = (s: string) =>
+  `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n")}"`;
+
+// Python list of string literals.
+const pyList = (items: string[]) => `[${items.map((s) => `"${s}"`).join(", ")}]`;
+
+// Filter expressions carry their own double-quoted Milvus literals, so render them with
+// triple quotes to avoid escaping noise; "" when there is no filter.
+const pyFilter = (s: string) => (s ? `"""${s}"""` : '""');
+
+function pyQuery(filter: string, limit: number, offset: number): string {
+  return [
+    `client.query(`,
+    `    collection_name="${COLLECTION}",`,
+    `    filter=${pyFilter(filter)},`,
+    `    limit=${limit},`,
+    `    offset=${offset},`,
+    `    output_fields=${pyList(OUTPUT_FIELDS)},`,
+    `)`,
+  ].join("\n");
+}
+
+function pySearch(opts: {
+  data: string; // Python expression for the data arg, e.g. "[query_vector]"
+  dataComment?: string;
+  annsField: string;
+  filter: string;
+  limit: number;
+  offset: number;
+}): string {
+  return [
+    `client.search(`,
+    `    collection_name="${COLLECTION}",`,
+    `    data=${opts.data},${opts.dataComment ? `  # ${opts.dataComment}` : ""}`,
+    `    anns_field="${opts.annsField}",`,
+    ...(opts.filter ? [`    filter=${pyFilter(opts.filter)},`] : []),
+    `    limit=${opts.limit},`,
+    `    offset=${opts.offset},`,
+    `    output_fields=${pyList(OUTPUT_FIELDS)},`,
+    `)`,
+  ].join("\n");
+}
+
+function pyHybrid(opts: {
+  reqs: { data: string; annsField: string; filter: string; limit: number }[];
+  ranker: string;
+  limit: number;
+  offset: number;
+}): string {
+  const reqLines = opts.reqs.map(
+    (r) =>
+      `        AnnSearchRequest(data=${r.data}, anns_field="${r.annsField}", param={}, limit=${r.limit}${r.filter ? `, expr=${pyFilter(r.filter)}` : ""}),`,
+  );
+  return [
+    `client.hybrid_search(`,
+    `    collection_name="${COLLECTION}",`,
+    `    reqs=[`,
+    ...reqLines,
+    `    ],`,
+    `    ranker=${opts.ranker},`,
+    `    limit=${opts.limit},`,
+    `    offset=${opts.offset},`,
+    `    output_fields=${pyList(OUTPUT_FIELDS)},`,
+    `)`,
+  ].join("\n");
+}
+
 async function zilliz(env: Env, path: string, body: unknown): Promise<any> {
   const res = await fetch(`${env.ZILLIZ_ENDPOINT}/v2/vectordb/${path}`, {
     method: "POST",
@@ -440,6 +516,7 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
     let seedMs: number | undefined;
     let annsField: string | undefined;
     let strategy: "dense" | "sparse" | "weighted" | undefined;
+    let pymilvusQuery: string | undefined;
     let zStart: number;
 
     if (seedId) {
@@ -469,6 +546,15 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
       if (Array.isArray(imageVec) && imageVec.length) {
         // Blend semantic-text and visual similarity via reciprocal-rank fusion.
         annsField = "text_vec + image_vec (rrf)";
+        pymilvusQuery = pyHybrid({
+          reqs: [
+            { data: "[seed_text_vec]", annsField: "text_vec", filter: subFilter, limit: subLimit },
+            { data: "[seed_image_vec]", annsField: "image_vec", filter: subFilter, limit: subLimit },
+          ],
+          ranker: "RRFRanker(60)",
+          limit: fetchLimit,
+          offset: fetchOffset,
+        });
         const out = await zilliz(env, "entities/hybrid_search", {
           collectionName: COLLECTION,
           search: [
@@ -484,6 +570,13 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
       } else {
         // Seed has no image vector — degrade to text-only similarity.
         annsField = "text_vec";
+        pymilvusQuery = pySearch({
+          data: "[seed_text_vec]",
+          annsField: "text_vec",
+          filter: subFilter,
+          limit: fetchLimit,
+          offset: fetchOffset,
+        });
         const out = await zilliz(env, "entities/search", {
           collectionName: COLLECTION,
           data: [textVec],
@@ -504,6 +597,13 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
         // No embedding call (latency/cost win) — embedMs/embedDim stay undefined.
         strategy = "sparse";
         annsField = "text_sparse";
+        pymilvusQuery = pySearch({
+          data: `[${pyStr(cleanedQuery)}]`,
+          annsField: "text_sparse",
+          filter,
+          limit: fetchLimit,
+          offset: fetchOffset,
+        });
         zStart = Date.now();
         const out = await zilliz(env, "entities/search", {
           collectionName: COLLECTION,
@@ -523,6 +623,14 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
         const vector = await embedQuery(env, cleanedQuery);
         embedMs = Date.now() - te;
         embedDim = vector.length;
+        pymilvusQuery = pySearch({
+          data: "[query_vector]",
+          dataComment: `${embedDim}-d embedding of ${pyStr(cleanedQuery)}`,
+          annsField: ANNS_FIELD,
+          filter,
+          limit: fetchLimit,
+          offset: fetchOffset,
+        });
         zStart = Date.now();
         const out = await zilliz(env, "entities/search", {
           collectionName: COLLECTION,
@@ -546,6 +654,15 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
         embedDim = vector.length;
         // Each sub-search must surface enough candidates to fill the requested window.
         const subLimit = Math.min(fetchOffset + fetchLimit, MAX_LIMIT);
+        pymilvusQuery = pyHybrid({
+          reqs: [
+            { data: "[query_vector]", annsField: "text_vec", filter, limit: subLimit },
+            { data: `[${pyStr(cleanedQuery)}]`, annsField: "text_sparse", filter, limit: subLimit },
+          ],
+          ranker: `WeightedRanker(${pyNum(alpha)}, ${pyNum(1 - alpha)}, norm_score=True)`,
+          limit: fetchLimit,
+          offset: fetchOffset,
+        });
         zStart = Date.now();
         const out = await zilliz(env, "entities/hybrid_search", {
           collectionName: COLLECTION,
@@ -562,6 +679,7 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
       }
     } else {
       mode = "browse";
+      pymilvusQuery = pyQuery(filter, fetchLimit, fetchOffset);
       zStart = Date.now();
       const out = await zilliz(env, "entities/query", {
         collectionName: COLLECTION,
@@ -605,6 +723,7 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
         pool: sorted ? fetchLimit : undefined,
         alpha: mode === "search" ? alpha : undefined,
         strategy,
+        pymilvusQuery,
         count: results.length,
         timings: { understandMs, embedMs, seedMs, zillizMs, serverMs: Date.now() - t0 },
       },
