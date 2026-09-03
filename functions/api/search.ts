@@ -11,9 +11,22 @@ import type {
   SortKey,
 } from "../../src/lib/types";
 import { POOL_SIZE, DEFAULT_HYBRID_ALPHA } from "../../src/lib/config";
+import { compileFilter, esc } from "../../src/lib/filter";
+import type { QueryMode } from "./rest";
+import {
+  CAPS,
+  nativeOrderByFields,
+  orderByFor,
+  orderByParam,
+  pyList,
+  pyNum,
+  pyOrderBy,
+  rrfRerank,
+  weightedRerank,
+} from "./rest";
 
 const MODEL = "@cf/qwen/qwen3-embedding-0.6b";
-const COLLECTION = "amazon_reviews";
+const COLLECTION = "amazon_reviews_v3";
 const ANNS_FIELD = "text_vec";
 // Chosen in STEP 0: the instruction-prefixed `queries` form aligns NL queries with the
 // plain-embedded documents and gives clean ranking (parity 6/6, mean cosine ~0.87).
@@ -36,6 +49,8 @@ const OUTPUT_FIELDS = [
   "categories",
   "image_url",
   "text_snippet",
+  "first_seen",
+  "store_city",
 ];
 
 // Zilliz serverless caps (from docs): limit <= 1024, limit + offset < 16384.
@@ -71,49 +86,28 @@ const CACHE_KEY_BASE = "https://cache.vdb-ecom/api/search";
 const isNum = (v: unknown): v is number =>
   typeof v === "number" && Number.isFinite(v);
 
-// Escape a string for safe interpolation inside a double-quoted Milvus literal.
-const esc = (s: string): string => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-
-function compileFilter(f: Filters = {}): string {
-  const clauses: string[] = [];
-  // Any price bound implies the user wants known prices — exclude the -1 sentinels.
-  if (isNum(f.priceMin) || isNum(f.priceMax)) clauses.push(`price > 0`);
-  if (isNum(f.priceMin)) clauses.push(`price >= ${f.priceMin}`);
-  if (isNum(f.priceMax)) clauses.push(`price <= ${f.priceMax}`);
-  if (isNum(f.minRating)) clauses.push(`average_rating >= ${f.minRating}`);
-  if (isNum(f.minReviews)) clauses.push(`rating_number >= ${f.minReviews}`);
-  if (f.brands?.length) {
-    const list = f.brands.map((b) => `"${esc(b)}"`).join(", ");
-    clauses.push(`store in [${list}]`);
-  }
-  if (f.category) clauses.push(`array_contains(categories, "${esc(f.category)}")`);
-  return clauses.join(" and ");
-}
-
 // --- Effective pymilvus query rendering ----------------------------------------------
 // The proxy talks Zilliz REST v2, but the diagnostics panel shows the equivalent pymilvus
 // (MilvusClient) call so the active search is legible as code. These builders mirror — and
 // are driven by — the exact params handed to each REST branch below.
 
-// Trim float noise (e.g. 1 - 0.7 -> 0.30000000000000004) for readable weights.
-const pyNum = (n: number) => String(Number(n.toFixed(4)));
-
 // Python string literal for arbitrary text (data values, comments).
 const pyStr = (s: string) =>
   `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n")}"`;
-
-// Python list of string literals.
-const pyList = (items: string[]) => `[${items.map((s) => `"${s}"`).join(", ")}]`;
 
 // Filter expressions carry their own double-quoted Milvus literals, so render them with
 // triple quotes to avoid escaping noise; "" when there is no filter.
 const pyFilter = (s: string) => (s ? `"""${s}"""` : '""');
 
-function pyQuery(filter: string, limit: number, offset: number): string {
+// `client.query` is the browse branch, hence the fixed "browse" mode: it is the only
+// call `orderByFields` exists on (probe 2), so it is the only transcript that can carry
+// an `order_by_fields=` line.
+function pyQuery(filter: string, limit: number, offset: number, sort: SortKey): string {
   return [
     `client.query(`,
     `    collection_name="${COLLECTION}",`,
     `    filter=${pyFilter(filter)},`,
+    ...pyOrderBy(sort, "browse"),
     `    limit=${limit},`,
     `    offset=${offset},`,
     `    output_fields=${pyList(OUTPUT_FIELDS)},`,
@@ -128,6 +122,8 @@ function pySearch(opts: {
   filter: string;
   limit: number;
   offset: number;
+  sort?: SortKey;
+  mode?: QueryMode;
 }): string {
   return [
     `client.search(`,
@@ -135,6 +131,7 @@ function pySearch(opts: {
     `    data=${opts.data},${opts.dataComment ? `  # ${opts.dataComment}` : ""}`,
     `    anns_field="${opts.annsField}",`,
     ...(opts.filter ? [`    filter=${pyFilter(opts.filter)},`] : []),
+    ...pyOrderBy(opts.sort ?? "relevance", opts.mode ?? "search"),
     `    limit=${opts.limit},`,
     `    offset=${opts.offset},`,
     `    output_fields=${pyList(OUTPUT_FIELDS)},`,
@@ -147,6 +144,8 @@ function pyHybrid(opts: {
   ranker: string;
   limit: number;
   offset: number;
+  sort?: SortKey;
+  mode?: QueryMode;
 }): string {
   const reqLines = opts.reqs.map(
     (r) =>
@@ -159,6 +158,7 @@ function pyHybrid(opts: {
     ...reqLines,
     `    ],`,
     `    ranker=${opts.ranker},`,
+    ...pyOrderBy(opts.sort ?? "relevance", opts.mode ?? "search"),
     `    limit=${opts.limit},`,
     `    offset=${opts.offset},`,
     `    output_fields=${pyList(OUTPUT_FIELDS)},`,
@@ -321,8 +321,21 @@ function toProduct(row: Record<string, any>): Product {
     categories: asStringArray(row.categories),
     image_url: row.image_url,
     text_snippet: row.text_snippet,
+    first_seen: typeof row.first_seen === "string" ? row.first_seen : undefined,
+    store_city: row.store_city,
     score: typeof row.distance === "number" ? row.distance : undefined,
   };
+}
+
+/**
+ * Documented no-op: probe 4 found no highlighter on this build, so a row never carries a
+ * highlight block and there is no fragment to return (and `Product` has no `highlight`
+ * field). Exported as the seam a highlighting build would fill in — parse
+ * `row.highlight?.text_snippet` / `row.entity?.highlight?.text_snippet` here and return
+ * the first fragment containing `HL_OPEN`.
+ */
+export function firstFragment(_row: Record<string, any>): string | undefined {
+  return undefined;
 }
 
 // Sort the retrieved candidate window. Relevance keeps native vector/scan order.
@@ -342,6 +355,14 @@ function applySort(results: Product[], sort: SortKey): Product[] {
       );
     case "reviews":
       return r.sort((a, b) => (b.rating_number ?? 0) - (a.rating_number ?? 0));
+    case "newest":
+      // first_seen is an RFC3339 string, so lexicographic compare is chronological.
+      // Rows without one sort last.
+      return r.sort((a, b) => {
+        const fa = a.first_seen ?? "";
+        const fb = b.first_seen ?? "";
+        return fa === fb ? 0 : fa > fb ? -1 : 1;
+      });
     case "relevance":
     default:
       return r;
@@ -460,9 +481,13 @@ export async function onRequestPost(ctx: Ctx): Promise<Response> {
 // payload, or a 502 on any failure (caller decides whether to cache).
 async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
   try {
+    const now = new Date();
     const rawQ = (body.q ?? "").trim();
     const seedId = (body.similarTo ?? "").trim();
     const sort: SortKey = body.sort ?? "relevance";
+    // Which branch runs is decided by the request alone, and the sort strategy depends on
+    // it (`orderByFields` exists only on `entities/query`), so resolve it up front.
+    const mode: QueryMode = seedId ? "similar" : rawQ ? "search" : "browse";
     // Dense/semantic weight for hybrid search: 0 = pure BM25, 1 = pure dense. Clamp to [0,1].
     const alpha = Math.min(1, Math.max(0, typeof body.alpha === "number" ? body.alpha : DEFAULT_HYBRID_ALPHA));
 
@@ -471,10 +496,14 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
     limit = Math.min(Math.max(1, limit), MAX_LIMIT);
     if (offset + limit > MAX_WINDOW) limit = Math.max(1, MAX_WINDOW - offset);
 
-    // Scalar sorts can't be paginated at the DB: over-fetch a relevance-ranked pool at
-    // offset 0, sort it whole, then slice the page below. Relevance keeps native, unbounded
-    // offset/limit pagination. fetchLimit/fetchOffset drive every Zilliz branch.
-    const sorted = sort !== "relevance";
+    // One sort can be pushed down to Milvus: browse + price_asc, via `orderByFields`
+    // (probe 2 — query-only, ascending-only, whole-set). That one paginates natively.
+    const nativeOrderBy = nativeOrderByFields(sort, mode);
+    // Every other scalar sort still can't be paginated at the DB: over-fetch a
+    // relevance-ranked pool at offset 0, sort it whole, then slice the page below.
+    // Relevance keeps native, unbounded offset/limit pagination. fetchLimit/fetchOffset
+    // drive every Zilliz branch.
+    const sorted = sort !== "relevance" && !nativeOrderBy;
     const fetchLimit = sorted ? Math.min(POOL_SIZE, MAX_LIMIT) : limit;
     const fetchOffset = sorted ? 0 : offset;
 
@@ -507,10 +536,9 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
 
     // UI filters combine with implied filters; the query's intent wins on conflict.
     const effectiveFilters: Filters = { ...(body.filters ?? {}), ...impliedFilters };
-    const filter = compileFilter(effectiveFilters);
+    const filter = compileFilter(effectiveFilters, now);
 
     let rows: Record<string, any>[];
-    let mode: "search" | "browse" | "similar";
     let embedMs: number | undefined;
     let embedDim: number | undefined;
     let seedMs: number | undefined;
@@ -521,7 +549,6 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
 
     if (seedId) {
       // "More like this": seed similarity from a product's stored vectors — no embedding.
-      mode = "similar";
       const ts = Date.now();
       const seedOut = await zilliz(env, "entities/query", {
         collectionName: COLLECTION,
@@ -554,6 +581,8 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
           ranker: "RRFRanker(60)",
           limit: fetchLimit,
           offset: fetchOffset,
+          sort,
+          mode,
         });
         const out = await zilliz(env, "entities/hybrid_search", {
           collectionName: COLLECTION,
@@ -561,7 +590,9 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
             { data: [textVec], annsField: "text_vec", filter: subFilter, limit: subLimit },
             { data: [imageVec], annsField: "image_vec", filter: subFilter, limit: subLimit },
           ],
-          rerank: { strategy: "rrf", params: { k: 60 } },
+          ...rrfRerank(),
+          // {} unless the sort can be pushed down, which on this build only browse can.
+          ...orderByParam(sort, mode),
           limit: fetchLimit,
           offset: fetchOffset,
           outputFields: OUTPUT_FIELDS,
@@ -576,12 +607,15 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
           filter: subFilter,
           limit: fetchLimit,
           offset: fetchOffset,
+          sort,
+          mode,
         });
         const out = await zilliz(env, "entities/search", {
           collectionName: COLLECTION,
           data: [textVec],
           annsField: "text_vec",
           filter: subFilter,
+          ...orderByParam(sort, mode),
           limit: fetchLimit,
           offset: fetchOffset,
           outputFields: OUTPUT_FIELDS,
@@ -589,7 +623,6 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
         rows = out.data ?? [];
       }
     } else if (rawQ) {
-      mode = "search";
       // Tunable blend of dense (text_vec) + BM25 lexical (text_sparse). Dispatch on alpha:
       // alpha>=1 pure dense, alpha<=0 pure BM25 (skips embedding), else weighted hybrid.
       if (alpha <= 0) {
@@ -670,7 +703,7 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
             { data: [vector], annsField: "text_vec", ...(filter ? { filter } : {}), limit: subLimit },
             { data: [cleanedQuery], annsField: "text_sparse", ...(filter ? { filter } : {}), limit: subLimit },
           ],
-          rerank: { strategy: "weighted", params: { weights: [alpha, 1 - alpha], norm_score: true } },
+          ...weightedRerank(alpha),
           limit: fetchLimit,
           offset: fetchOffset,
           outputFields: OUTPUT_FIELDS,
@@ -678,12 +711,14 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
         rows = out.data ?? [];
       }
     } else {
-      mode = "browse";
-      pymilvusQuery = pyQuery(filter, fetchLimit, fetchOffset);
+      pymilvusQuery = pyQuery(filter, fetchLimit, fetchOffset, sort);
       zStart = Date.now();
       const out = await zilliz(env, "entities/query", {
         collectionName: COLLECTION,
         filter, // "" is accepted = browse all
+        // The one push-down this build supports: sorts the whole filtered set, so
+        // fetchLimit/fetchOffset are the real page window (no pool over-fetch).
+        ...orderByParam(sort, mode),
         limit: fetchLimit,
         offset: fetchOffset,
         outputFields: OUTPUT_FIELDS,
@@ -721,6 +756,8 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
         limit,
         offset,
         pool: sorted ? fetchLimit : undefined,
+        orderBy: nativeOrderBy ? orderByFor(sort) : undefined,
+        orderBySemantics: nativeOrderBy ? CAPS.orderBySemantics : undefined,
         alpha: mode === "search" ? alpha : undefined,
         strategy,
         pymilvusQuery,
