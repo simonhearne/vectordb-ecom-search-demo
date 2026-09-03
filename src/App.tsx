@@ -91,6 +91,11 @@ export function App() {
   // keeps the user's original text, but we still search the clean text so the stripped
   // filter phrases ("under $60") don't pollute the embedding. Empty until understood.
   const embedText = useRef("");
+  // The most recently resolved facets debug payload, kept outside React state so the search
+  // effect's `.then` can read it synchronously instead of through a closure over `liveFacets`
+  // (which would be stale — fixed at the render that started this effect run, not at response
+  // time). The facets effect writes this the instant its response lands, before setLiveFacets.
+  const facetsDebugRef = useRef<FacetsResponse["debug"] | undefined>(undefined);
   const activeFilters = useMemo(() => countActive(filters), [filters]);
 
   useEffect(() => {
@@ -100,10 +105,19 @@ export function App() {
   // Live facet counts: refetch when the committed query or the filters change (not on
   // page/sort/blend changes). Best-effort — a failure just leaves the prior liveFacets.
   useEffect(() => {
-    if (similarTo) return;
+    if (similarTo) {
+      // A similar-mode search never carries a facet aggregation — clear the ref so a
+      // subsequent search effect run can't attach a stale query's facets to it.
+      facetsDebugRef.current = undefined;
+      return;
+    }
     const q = committedQuery.trim();
     fetchFacets({ q: embedText.current || q || undefined, filters })
       .then((res) => {
+        // Write the ref synchronously, before setLiveFacets, so the search effect's `.then`
+        // (which may resolve before or after this one) always reads the current query's
+        // facets rather than a stale closure value.
+        facetsDebugRef.current = res.debug;
         setLiveFacets(res);
         setDiag((d) => (d ? { ...d, facets: res.debug } : d));
       })
@@ -158,7 +172,7 @@ export function App() {
           request,
           response: res,
           clientMs: Math.round(performance.now() - started),
-          facets: liveFacets?.debug,
+          facets: facetsDebugRef.current,
         });
 
         // Adopt the proxy's interpretation: keep the user's original text in the box, but
