@@ -4,23 +4,30 @@
  * The browser never sees the DB key and never calls Zilliz directly.
  */
 import type {
+  Boost,
   Filters,
+  Fusion,
   Product,
   SearchRequest,
   SearchResponse,
   SortKey,
 } from "../../src/lib/types";
 import { POOL_SIZE, DEFAULT_HYBRID_ALPHA } from "../../src/lib/config";
-import { compileFilter, esc } from "../../src/lib/filter";
+import { compileFilter, dateCutoffIso, esc, extractPhrase } from "../../src/lib/filter";
 import type { QueryMode } from "./rest";
 import {
   CAPS,
+  decayParam,
+  groupParam,
+  highlighterParam,
   nativeOrderByFields,
   orderByFor,
   orderByParam,
+  pyGroup,
+  pyHighlighter,
   pyList,
-  pyNum,
   pyOrderBy,
+  pyRanker,
   rrfRerank,
   weightedRerank,
 } from "./rest";
@@ -124,6 +131,10 @@ function pySearch(opts: {
   offset: number;
   sort?: SortKey;
   mode?: QueryMode;
+  group?: boolean;
+  highlight?: boolean;
+  // The FunctionScore rendering of a decay boost — only the single-field paths carry one.
+  ranker?: string | null;
 }): string {
   return [
     `client.search(`,
@@ -131,6 +142,9 @@ function pySearch(opts: {
     `    data=${opts.data},${opts.dataComment ? `  # ${opts.dataComment}` : ""}`,
     `    anns_field="${opts.annsField}",`,
     ...(opts.filter ? [`    filter=${pyFilter(opts.filter)},`] : []),
+    ...(opts.ranker ? [`    ranker=${opts.ranker},`] : []),
+    ...pyGroup(opts.group ?? false),
+    ...pyHighlighter(opts.highlight ?? false),
     ...pyOrderBy(opts.sort ?? "relevance", opts.mode ?? "search"),
     `    limit=${opts.limit},`,
     `    offset=${opts.offset},`,
@@ -146,6 +160,8 @@ function pyHybrid(opts: {
   offset: number;
   sort?: SortKey;
   mode?: QueryMode;
+  group?: boolean;
+  highlight?: boolean;
 }): string {
   const reqLines = opts.reqs.map(
     (r) =>
@@ -158,6 +174,8 @@ function pyHybrid(opts: {
     ...reqLines,
     `    ],`,
     `    ranker=${opts.ranker},`,
+    ...pyGroup(opts.group ?? false),
+    ...pyHighlighter(opts.highlight ?? false),
     ...pyOrderBy(opts.sort ?? "relevance", opts.mode ?? "search"),
     `    limit=${opts.limit},`,
     `    offset=${opts.offset},`,
@@ -383,6 +401,11 @@ function canonicalFilters(f: Filters = {}): Record<string, unknown> {
   if (isNum(f.minReviews)) out.minReviews = f.minReviews;
   if (f.brands?.length) out.brands = [...f.brands].sort();
   if (f.category) out.category = f.category;
+  if (f.phrase?.trim()) out.phrase = f.phrase.trim();
+  // Key on the day-rounded cutoff, not the raw day count: that is what the compiled filter
+  // actually carries, so two requests a minute apart still share one entry.
+  if (isNum(f.listedWithinDays) && f.listedWithinDays > 0) out.listedCutoff = dateCutoffIso(f.listedWithinDays);
+  if (f.near?.city && isNum(f.near.km)) out.near = { city: f.near.city.trim().toLowerCase(), km: f.near.km };
   return out;
 }
 
@@ -402,6 +425,11 @@ function normalizeForKey(body: SearchRequest): Record<string, unknown> {
     offset: Math.max(0, Math.floor(body.offset ?? 0)),
     limit,
     understand: body.understand !== false,
+    fusion: body.fusion === "rrf" ? "rrf" : "weighted",
+    synonyms: body.synonyms !== false,
+    groupByBrand: body.groupByBrand === true,
+    boost: body.boost ?? null,
+    day: new Date().toISOString().slice(0, 10), // boost "newest" origin and date cutoffs roll daily
     filters: canonicalFilters(body.filters),
   };
 }
@@ -490,6 +518,18 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
     const mode: QueryMode = seedId ? "similar" : rawQ ? "search" : "browse";
     // Dense/semantic weight for hybrid search: 0 = pure BM25, 1 = pure dense. Clamp to [0,1].
     const alpha = Math.min(1, Math.max(0, typeof body.alpha === "number" ? body.alpha : DEFAULT_HYBRID_ALPHA));
+    // How the two sub-searches are fused when both run: weighted (α-tunable) or RRF.
+    const fusion: Fusion = body.fusion === "rrf" ? "rrf" : "weighted";
+    // Lexical field: the synonym-expanded analyzer by default ("tablet" also matches iPad),
+    // or the plain BM25 field when the UI switches synonyms off.
+    const synonyms = body.synonyms !== false;
+    const sparseField = synonyms ? "text_syn_sparse" : "text_sparse";
+    const groupByBrand = body.groupByBrand === true;
+    // `newest` would need a TIMESTAMPTZ decay input, which this build rejects (probe 7), so
+    // `decaySpec` returns null for it — treat it as no boost rather than a silent no-op.
+    const boost: Boost | null = (["cheaper", "rated", "popular"] as readonly string[]).includes(body.boost ?? "")
+      ? (body.boost as Boost)
+      : null;
 
     const offset = Math.max(0, Math.floor(body.offset ?? 0));
     let limit = Math.floor(body.limit ?? 24);
@@ -511,14 +551,18 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
 
     // Strip filter phrases out of the query before embedding; surface the implied
     // filters back to the UI. Never let understanding failure break the search.
-    let cleanedQuery = rawQ;
+    // A "quoted phrase" becomes an exact-phrase filter — deterministically, before the LLM
+    // ever sees the text. The words stay in `unquoted` (they are still good query terms);
+    // only the quote marks go.
+    const { phrase, rest: unquoted } = extractPhrase(rawQ);
+    let cleanedQuery = unquoted;
     let llmFilters: Filters = {};
     let understood = false;
     let understandMs: number | undefined;
     if (rawQ !== "" && body.understand !== false) {
       const tu = Date.now();
       try {
-        const r = await understandQuery(env, rawQ);
+        const r = await understandQuery(env, unquoted);
         cleanedQuery = r.cleanedQuery;
         llmFilters = r.filters;
         understood = true;
@@ -531,7 +575,8 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
 
     // Deterministic backstop fills any explicit filter the LLM missed (or all of them
     // if the LLM call failed). The model still owns cleaned_query and fuzzy phrasing.
-    const impliedFilters = rawQ !== "" ? backstopFilters(rawQ, llmFilters) : {};
+    const impliedFilters: Filters = rawQ !== "" ? backstopFilters(unquoted, llmFilters) : {};
+    if (phrase) impliedFilters.phrase = phrase;
     const applied = understood || Object.keys(impliedFilters).length > 0;
 
     // UI filters combine with implied filters; the query's intent wins on conflict.
@@ -543,7 +588,10 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
     let embedDim: number | undefined;
     let seedMs: number | undefined;
     let annsField: string | undefined;
-    let strategy: "dense" | "sparse" | "weighted" | undefined;
+    let strategy: "dense" | "sparse" | "weighted" | "rrf" | undefined;
+    let groupBy: string | undefined;
+    let sparseFieldUsed: "text_sparse" | "text_syn_sparse" | undefined;
+    let ranker: string | undefined;
     let pymilvusQuery: string | undefined;
     let zStart: number;
 
@@ -623,32 +671,66 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
         rows = out.data ?? [];
       }
     } else if (rawQ) {
-      // Tunable blend of dense (text_vec) + BM25 lexical (text_sparse). Dispatch on alpha:
-      // alpha>=1 pure dense, alpha<=0 pure BM25 (skips embedding), else weighted hybrid.
-      if (alpha <= 0) {
+      // Tunable blend of dense (text_vec) + BM25 lexical (the sparse field). Dispatch on
+      // fusion + alpha: weighted α>=1 pure dense, weighted α<=0 pure BM25 (skips the
+      // embedding), otherwise a hybrid fused by RRF or by the weighted reranker.
+      // Each sub-search must surface enough candidates to fill the requested window.
+      const subLimit = Math.min(fetchOffset + fetchLimit, MAX_LIMIT);
+      const hybrid = fusion === "rrf" || (alpha > 0 && alpha < 1);
+      // A decay boost is sent as a FunctionScore, and on hybrid search that REPLACES the
+      // fusion reranker — only one reranker per request (probe 7). So the boost applies on
+      // the single-field paths only; hybrid keeps its fusion and the UI greys the boost out.
+      const boostActive = !!boost && (!hybrid || CAPS.decayStacksWithFusion);
+      // No highlighter exists on this build (probe 4) — both CAPS are false, so this is
+      // always false. Kept as the gate a highlighting build would flip.
+      const highlight =
+        alpha < 1 || fusion === "rrf" ? (hybrid ? CAPS.highlightHybrid : CAPS.highlightSparse) : false;
+      // groupingField works on both entities/search and entities/hybrid_search (probe 6).
+      const group = groupByBrand;
+      const common = {
+        // Never `orderByParam` here: `orderByFields` is silently dropped by search and
+        // hybrid_search (probe 2), so the pool sort below owns every non-browse sort.
+        ...groupParam(group),
+        ...highlighterParam(highlight),
+        limit: fetchLimit,
+        offset: fetchOffset,
+        outputFields: OUTPUT_FIELDS,
+      };
+      // One gate for both the wire request and the transcript, so they cannot disagree.
+      const rankerText = pyRanker({ fusion, alpha, boost: boostActive ? boost : null, hybrid }, now);
+      // Read the diagnostics back off the builders, so `groupBy` can only claim a grouping
+      // the request actually carries. `sparseField` is set per branch — the pure-dense path
+      // never touches a sparse field, so it must not advertise one.
+      groupBy = Object.keys(groupParam(group)).length ? "store" : undefined;
+      ranker = rankerText ?? undefined;
+
+      if (fusion === "weighted" && alpha <= 0) {
         // Pure BM25: Milvus applies the analyzer + BM25 function to the raw query text.
         // No embedding call (latency/cost win) — embedMs/embedDim stay undefined.
         strategy = "sparse";
-        annsField = "text_sparse";
+        annsField = sparseField;
+        sparseFieldUsed = sparseField;
         pymilvusQuery = pySearch({
           data: `[${pyStr(cleanedQuery)}]`,
-          annsField: "text_sparse",
+          annsField: sparseField,
           filter,
           limit: fetchLimit,
           offset: fetchOffset,
+          group,
+          highlight,
+          ranker: rankerText,
         });
         zStart = Date.now();
         const out = await zilliz(env, "entities/search", {
           collectionName: COLLECTION,
           data: [cleanedQuery],
-          annsField: "text_sparse",
+          annsField: sparseField,
           ...(filter ? { filter } : {}),
-          limit: fetchLimit,
-          offset: fetchOffset,
-          outputFields: OUTPUT_FIELDS,
+          ...(boostActive ? decayParam(boost, now) : {}),
+          ...common,
         });
         rows = out.data ?? [];
-      } else if (alpha >= 1) {
+      } else if (fusion === "weighted" && alpha >= 1) {
         // Pure dense vector search.
         strategy = "dense";
         annsField = ANNS_FIELD;
@@ -663,6 +745,9 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
           filter,
           limit: fetchLimit,
           offset: fetchOffset,
+          group,
+          highlight: false,
+          ranker: rankerText,
         });
         zStart = Date.now();
         const out = await zilliz(env, "entities/search", {
@@ -670,43 +755,43 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
           data: [vector],
           annsField: ANNS_FIELD,
           ...(filter ? { filter } : {}),
-          limit: fetchLimit,
-          offset: fetchOffset,
-          outputFields: OUTPUT_FIELDS,
+          ...(boostActive ? decayParam(boost, now) : {}),
+          ...common,
         });
         rows = out.data ?? [];
       } else {
-        // Weighted hybrid: dense + BM25 sub-searches fused by a weighted reranker. The
+        // Hybrid: dense + BM25 sub-searches fused by RRF or by the weighted reranker. The
         // dense sub-search MUST be first so weights[0]=alpha applies to it (positional).
         // norm_score min-max normalizes each sub-search to [0,1] so weights are linear.
-        strategy = "weighted";
-        annsField = `text_vec + text_sparse (weighted α=${alpha})`;
+        strategy = fusion === "rrf" ? "rrf" : "weighted";
+        annsField = `text_vec + ${sparseField} (${strategy}${strategy === "weighted" ? ` α=${alpha}` : ""})`;
+        sparseFieldUsed = sparseField;
         const te = Date.now();
         const vector = await embedQuery(env, cleanedQuery);
         embedMs = Date.now() - te;
         embedDim = vector.length;
-        // Each sub-search must surface enough candidates to fill the requested window.
-        const subLimit = Math.min(fetchOffset + fetchLimit, MAX_LIMIT);
         pymilvusQuery = pyHybrid({
           reqs: [
             { data: "[query_vector]", annsField: "text_vec", filter, limit: subLimit },
-            { data: `[${pyStr(cleanedQuery)}]`, annsField: "text_sparse", filter, limit: subLimit },
+            { data: `[${pyStr(cleanedQuery)}]`, annsField: sparseField, filter, limit: subLimit },
           ],
-          ranker: `WeightedRanker(${pyNum(alpha)}, ${pyNum(1 - alpha)}, norm_score=True)`,
+          ranker: rankerText ?? "RRFRanker(60)",
           limit: fetchLimit,
           offset: fetchOffset,
+          group,
+          highlight,
         });
         zStart = Date.now();
         const out = await zilliz(env, "entities/hybrid_search", {
           collectionName: COLLECTION,
           search: [
             { data: [vector], annsField: "text_vec", ...(filter ? { filter } : {}), limit: subLimit },
-            { data: [cleanedQuery], annsField: "text_sparse", ...(filter ? { filter } : {}), limit: subLimit },
+            { data: [cleanedQuery], annsField: sparseField, ...(filter ? { filter } : {}), limit: subLimit },
           ],
-          ...weightedRerank(alpha),
-          limit: fetchLimit,
-          offset: fetchOffset,
-          outputFields: OUTPUT_FIELDS,
+          // The fusion reranker owns `rerank` here — a decay FunctionScore would replace it
+          // (probe 7), which is why `boostActive` is false on this path.
+          ...(fusion === "rrf" ? rrfRerank() : weightedRerank(alpha)),
+          ...common,
         });
         rows = out.data ?? [];
       }
@@ -760,6 +845,9 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
         orderBySemantics: nativeOrderBy ? CAPS.orderBySemantics : undefined,
         alpha: mode === "search" ? alpha : undefined,
         strategy,
+        groupBy,
+        ranker,
+        sparseField: mode === "search" ? sparseFieldUsed : undefined,
         pymilvusQuery,
         count: results.length,
         timings: { understandMs, embedMs, seedMs, zillizMs, serverMs: Date.now() - t0 },
