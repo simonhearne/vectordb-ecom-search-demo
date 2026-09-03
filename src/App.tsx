@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
+  Boost,
   Diagnostics,
   Facets,
   FacetsResponse,
   Filters,
+  Fusion,
   ParsedQuery,
   Product,
   SearchRequest,
@@ -13,6 +15,7 @@ import { PAGE_SIZE, POOL_SIZE, DEFAULT_HYBRID_ALPHA } from "./lib/config";
 import { fetchFacets, loadFacets, search } from "./lib/searchClient";
 import { Header } from "./components/Header";
 import { BlendSlider } from "./components/BlendSlider";
+import { SearchControls } from "./components/SearchControls";
 import { FilterPanel } from "./components/FilterPanel";
 import { ProductGrid } from "./components/ProductGrid";
 import { Pagination } from "./components/Pagination";
@@ -60,6 +63,11 @@ export function App() {
   // Dense/semantic blend (α): a global relevance preference that persists across queries,
   // "More like this", and clear — only sent (and shown) in search mode.
   const [alpha, setAlpha] = useState(DEFAULT_HYBRID_ALPHA);
+  // Milvus 3.0 search controls — persist across queries like α, sent only in search mode.
+  const [fusion, setFusion] = useState<Fusion>("weighted");
+  const [synonyms, setSynonyms] = useState(true);
+  const [groupByBrand, setGroupByBrand] = useState(false);
+  const [boost, setBoost] = useState<Boost | null>(null);
   const [page, setPage] = useState(0);
   const [nonce, setNonce] = useState(0);
 
@@ -100,7 +108,7 @@ export function App() {
   // Reset to first page whenever the committed query, similar seed, filters, or sort change.
   useEffect(() => {
     setPage(0);
-  }, [committedQuery, similarTo, filters, sort, alpha]);
+  }, [committedQuery, similarTo, filters, sort, alpha, fusion, synonyms, groupByBrand, boost]);
 
   // Fetch on any input change. reqId guards against out-of-order responses.
   useEffect(() => {
@@ -130,8 +138,9 @@ export function App() {
           limit: PAGE_SIZE,
           offset: page * PAGE_SIZE,
           understand,
-          // Blend only applies to a real query search (BM25 needs query text); omit for browse.
-          ...(rawQ !== "" ? { alpha } : {}),
+          // Blend/controls only apply to a real query search (BM25 needs query text); omit
+          // for browse.
+          ...(rawQ !== "" ? { alpha, fusion, synonyms, groupByBrand, boost } : {}),
         };
     const started = performance.now();
     search(request)
@@ -167,7 +176,7 @@ export function App() {
       .finally(() => {
         if (id === reqId.current) setLoading(false);
       });
-  }, [committedQuery, similarTo, filters, sort, alpha, page, nonce]);
+  }, [committedQuery, similarTo, filters, sort, alpha, fusion, synonyms, groupByBrand, boost, page, nonce]);
 
   const patch = (p: Partial<Filters>) => setFilters((prev) => ({ ...prev, ...p }));
   const clearFilters = () => {
@@ -227,6 +236,14 @@ export function App() {
   // The blend control is only meaningful in search mode (a committed query, not similarity).
   const showBlend = committedQuery.trim() !== "" && !similarTo;
 
+  // RRF fusion and a blended α (neither pure keyword nor pure semantic) both run two
+  // rerankers already — Milvus allows only one, so the decay boost can't stack on top.
+  // Purely client-side: mirrors the proxy's own α=0/α=1-only boost rule.
+  const hybrid = fusion === "rrf" || (alpha > 0 && alpha < 1);
+  const boostDisabledReason = hybrid
+    ? "Boost applies at the Keyword or Semantic extremes of the slider (Milvus runs one reranker per search)"
+    : undefined;
+
   const summary = () => {
     if (loading) return "Searching…";
     // On a sorted page, report the pool count (with "+" when the pool was truncated at the
@@ -258,6 +275,16 @@ export function App() {
         alpha={alpha}
         onAlpha={setAlpha}
         showBlend={showBlend}
+        blendDisabled={fusion === "rrf"}
+        controls={
+          <SearchControls
+            fusion={fusion} onFusion={setFusion}
+            synonyms={synonyms} onSynonyms={setSynonyms}
+            groupByBrand={groupByBrand} onGroupByBrand={setGroupByBrand}
+            boost={boost} onBoost={setBoost}
+            boostDisabledReason={boostDisabledReason}
+          />
+        }
       />
 
       <main className="mx-auto max-w-[1400px] px-4 py-6 sm:px-6 lg:py-10">
@@ -339,8 +366,15 @@ export function App() {
             </div>
             <div className="flex-1 overflow-y-auto px-5 py-2">
               {showBlend && (
-                <div className="mb-4 border-b border-line pb-4 pt-2">
-                  <BlendSlider alpha={alpha} onChange={setAlpha} />
+                <div className="mb-4 flex flex-col gap-3 border-b border-line pb-4 pt-2">
+                  <BlendSlider alpha={alpha} onChange={setAlpha} disabled={fusion === "rrf"} />
+                  <SearchControls
+                    fusion={fusion} onFusion={setFusion}
+                    synonyms={synonyms} onSynonyms={setSynonyms}
+                    groupByBrand={groupByBrand} onGroupByBrand={setGroupByBrand}
+                    boost={boost} onBoost={setBoost}
+                    boostDisabledReason={boostDisabledReason}
+                  />
                 </div>
               )}
               {facets && <FilterPanel facets={facets} filters={filters} onChange={patch} />}
