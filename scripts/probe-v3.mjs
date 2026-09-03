@@ -154,10 +154,26 @@ const obHybridReal = await rawCall("entities/hybrid_search", H({ orderByFields: 
 push(2, "order_by on search", /does not exist/.test(obSearchReal.text) ? "PASS" : "FAIL", "orderByFields silently dropped");
 push(2, "order_by on hybrid_search", /does not exist/.test(obHybridReal.text) ? "PASS" : "FAIL", "orderByFields silently dropped");
 
-const OB = obQuery.ok ? "orderByFields" : null;
+// Derive the parameter name AND the accepted value shape from whichever variant won, so a
+// future build that renames the parameter (or changes the value shape) does not make every
+// downstream order_by probe emit a false FAIL against the stale name.
+const obWinner = obQuery.ok
+  ? ORDER_CANDIDATES.find(([k, v]) => `${k}=${JSON.stringify(v)}` === obQuery.variant)
+  : null;
+const OB = obWinner ? obWinner[0] : null;
+/** Re-express a list of field names in the winning variant's value shape. */
+const obVal = (fields) => {
+  const sample = obWinner[1][0];
+  if (sample && typeof sample === "object") return fields.map((f) => ({ ...sample, field: f }));
+  if (typeof sample === "string" && sample.includes(" ")) {
+    const suffix = sample.slice(sample.indexOf(" "));
+    return fields.map((f) => f + suffix);
+  }
+  return fields;
+};
 if (OB) {
   // Semantics: is the sorted page the top-`limit` window or the whole filtered set?
-  const mk = (limit) => Q({ [OB]: ["price"], limit }).body;
+  const mk = (limit) => Q({ [OB]: obVal(["price"]), limit }).body;
   const wide = await call("entities/query", mk(200));
   const narrow = await call("entities/query", mk(5));
   const sameHead = ids(narrow.data) === ids(wide.data.slice(0, 5));
@@ -165,10 +181,10 @@ if (OB) {
   // Descending?
   let desc = null;
   for (const [k, bad] of [["orderByType", 123], ["orderByDirection", 123], ["descending", { __p: 1 }], ["desc", { __p: 1 }], ["reverse", { __p: 1 }], ["sortOrder", 123]]) {
-    if (await inStruct("entities/query", Q({ [OB]: ["price"] }).body, k, bad)) { desc = k; break; }
+    if (await inStruct("entities/query", Q({ [OB]: obVal(["price"]) }).body, k, bad)) { desc = k; break; }
   }
   push(2, "order_by descending", desc ? "PASS" : "FAIL", desc ?? "no direction field in struct (asc only)");
-  await probe(2, "order_by multi-field", [{ label: OB, ...Q({ [OB]: ["average_rating", "price"], outputFields: ["parent_asin", "price", "average_rating"] }) }],
+  await probe(2, "order_by multi-field", [{ label: OB, ...Q({ [OB]: obVal(["average_rating", "price"]), outputFields: ["parent_asin", "price", "average_rating"] }) }],
     (r) => r.length > 1 && r.every((x, i) => i === 0 || x.average_rating >= r[i - 1].average_rating));
 }
 
@@ -254,9 +270,13 @@ if (dec.ok) {
   // Only the winning style can answer this — the others are silently dropped, so a
   // "success" from them would be a false PASS.
   const tsParams = { reranker: "decay", function: "gauss", origin: 1772668800, scale: 2592000, decay: 0.5 };
+  const tsShape = { outputFields: ["parent_asin", "first_seen"] };
+  // Baseline must come from the SAME request minus the reranker — comparing against a
+  // differently-filtered baseline would score "reordered" even if decay were ignored.
+  const tsBaseline = ids((await call("entities/search", S(tsShape).body)).data);
   await probe(7, "decay rerank on TIMESTAMPTZ first_seen", decayVariants(
-    (x) => S({ outputFields: ["parent_asin", "first_seen"], ...x }), "first_seen", tsParams,
-  ).filter((v) => v.label === dec.variant), reordered);
+    (x) => S({ ...tsShape, ...x }), "first_seen", tsParams,
+  ).filter((v) => v.label === dec.variant), (r) => r.length > 0 && ids(r) !== tsBaseline);
   // Does functionScore STACK on the weighted/rrf fusion, or replace it?
   const withW = ids((await call("entities/hybrid_search", H({ functionScore: fnScore(decayParams, "price") }).body)).data);
   const withR = ids((await call("entities/hybrid_search", H({ rerank: { strategy: "rrf", params: { k: 60 } }, functionScore: fnScore(decayParams, "price") }).body)).data);
@@ -272,6 +292,27 @@ if (dec.ok) {
   await probe(7, "weighted fusion expressed via functionScore", [
     { label: "reranker:weighted", ...H({ rerank: undefined, functionScore: fnScore({ reranker: "weighted", weights: [0.6, 0.4], norm_score: true }) }) },
   ], (r) => ids(r) === hybridBaseline);
+  // Which `params.reranker` values does this build accept? The server does NOT enumerate them,
+  // so each candidate is sent on its own: "unsupported reranker <x>" means the name is unknown;
+  // ANY other error (missing/invalid params for that reranker) means the name IS known.
+  // `__bogus__` is the control that proves the rejection message is the discriminator.
+  const RERANKER_CANDIDATES = ["weighted", "rrf", "decay", "model", "boost", "normalize", "chain", "score", "__bogus__"];
+  const acceptedRerankers = [];
+  for (const rk of RERANKER_CANDIDATES) {
+    const { text } = await rawCall("entities/hybrid_search", H({ functionScore: fnScore({ reranker: rk }, "price") }).body);
+    if (!text.includes(`unsupported reranker ${rk}`)) acceptedRerankers.push(rk);
+    if (VERBOSE) console.log(`  7 reranker=${rk}: ${text.slice(0, 180)}`);
+  }
+  const controlRejected = !acceptedRerankers.includes("__bogus__");
+  push(7, "params.reranker values accepted (probed name-by-name; server does not enumerate)",
+    controlRejected && acceptedRerankers.length > 0 ? "PASS" : "FAIL",
+    acceptedRerankers.join("|") || "none", `control __bogus__ ${controlRejected ? "rejected" : "ACCEPTED - test invalid"}`);
+  // The decay `function` enum, by contrast, IS enumerated by the server's own error text.
+  const fnErr = (await rawCall("entities/search", S({ filter: "price > 0", functionScore: fnScore({ ...decayParams, function: "__bogus__" }, "price") }).body)).text;
+  const fnEnum = fnErr.match(/must be one of \[([^\]]+)\]/);
+  push(7, "decay `function` values accepted (from the server's own error text)",
+    fnEnum ? "PASS" : "FAIL", fnEnum ? fnEnum[1].split(/,\s*/).join("|") : "server did not enumerate");
+
   await probe(7, "boost reranker (filter + weight)", [
     { label: "reranker:boost", ...S({ filter: "price > 0", functionScore: fnScore({ reranker: "boost", weight: 2.0, filter: "price < 10" }) }) },
   ], reordered);
@@ -283,7 +324,7 @@ await probe(8, "TIMESTAMPTZ filter + output", [
   { label: "bare literal", ...S({ filter: "first_seen > '2026-08-01T00:00:00Z'", outputFields: ["parent_asin", "first_seen"] }) },
 ], (r) => r.length > 0 && typeof r[0].first_seen === "string");
 if (OB) await probe(8, "order_by first_seen (TIMESTAMPTZ)", [
-  { label: OB, ...Q({ [OB]: ["first_seen"], filter: "", outputFields: ["parent_asin", "first_seen"] }) },
+  { label: OB, ...Q({ [OB]: obVal(["first_seen"]), filter: "", outputFields: ["parent_asin", "first_seen"] }) },
 ], (r) => r.length > 1);
 
 // ── 9 geo ─────────────────────────────────────────────────────────────────────

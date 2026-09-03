@@ -30,8 +30,18 @@ export const REST_NAMES = {
   decayStyle: "functionScore" as "rerank" | "functionScore" | "function_score",
   /** probe 11 — every candidate path returns HTTP 404; the route does not exist. */
   runAnalyzerPath: null as string | null,
-  /** probe 7 — the `params.reranker` values this build accepts. */
+  /**
+   * probe 7 row "params.reranker values accepted" — verbatim
+   * `weighted|rrf|decay|model|boost`. The server does not enumerate these, so the probe
+   * sends each name on its own: `unsupported reranker <x>` means unknown, any other error
+   * means known, with `__bogus__` as the control.
+   */
   rerankers: ["weighted", "rrf", "decay", "model", "boost"] as const,
+  /**
+   * probe 7 row "decay `function` values accepted" — verbatim `gauss|exp|linear`, taken
+   * from the server's own error text (`must be one of [gauss, exp, linear]`).
+   */
+  decayFunctions: ["gauss", "exp", "linear"] as const,
   /** probe 12 — the field on an `indexes/describe` row that names the index type. */
   describeIndexTypeField: "indexType",
 };
