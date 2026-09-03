@@ -97,6 +97,7 @@ export interface Diagnostics {
   request: SearchRequest;
   response: SearchResponse;
   clientMs: number;
+  facets?: FacetsResponse["debug"];
 }
 
 export interface Facets {

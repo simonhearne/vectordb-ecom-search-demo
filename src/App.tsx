@@ -103,7 +103,10 @@ export function App() {
     if (similarTo) return;
     const q = committedQuery.trim();
     fetchFacets({ q: embedText.current || q || undefined, filters })
-      .then(setLiveFacets)
+      .then((res) => {
+        setLiveFacets(res);
+        setDiag((d) => (d ? { ...d, facets: res.debug } : d));
+      })
       .catch(() => {});
   }, [committedQuery, filters, similarTo]);
 
@@ -151,7 +154,12 @@ export function App() {
         setResults(res.results);
         setTotal(res.total ?? null);
         setMode(res.mode);
-        setDiag({ request, response: res, clientMs: Math.round(performance.now() - started) });
+        setDiag({
+          request,
+          response: res,
+          clientMs: Math.round(performance.now() - started),
+          facets: liveFacets?.debug,
+        });
 
         // Adopt the proxy's interpretation: keep the user's original text in the box, but
         // remember the cleaned query to embed on follow-up fetches, and merge implied

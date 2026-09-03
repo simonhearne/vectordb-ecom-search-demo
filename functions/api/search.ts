@@ -23,6 +23,7 @@ import {
   nativeOrderByFields,
   orderByFor,
   orderByParam,
+  REST_NAMES,
   pyGroup,
   pyHighlighter,
   pyList,
@@ -198,6 +199,23 @@ async function zilliz(env: Env, path: string, body: unknown): Promise<any> {
     throw new Error(`Zilliz ${path}: ${json.message ?? JSON.stringify(json)}`);
   }
   return json;
+}
+
+// Vector index type (e.g. "IVF_RABITQ"), fetched once per isolate and memoized — it does
+// not change over the lifetime of the collection. Best-effort: on failure this just
+// leaves the diagnostics row blank rather than failing the search.
+let indexTypeMemo: string | undefined;
+async function vectorIndexType(env: Env): Promise<string | undefined> {
+  if (!CAPS.describeIndex) return undefined;
+  if (indexTypeMemo) return indexTypeMemo;
+  try {
+    const out = await zilliz(env, "indexes/describe", { collectionName: COLLECTION, indexName: "text_vec" });
+    const d = out.data?.[0];
+    indexTypeMemo = d?.[REST_NAMES.describeIndexTypeField] ?? d?.index_type ?? d?.params?.index_type;
+  } catch (e: any) {
+    console.error("describe index failed:", e?.message ?? e);
+  }
+  return indexTypeMemo;
 }
 
 async function embedQuery(env: Env, q: string): Promise<number[]> {
@@ -848,6 +866,7 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
         groupBy,
         ranker,
         sparseField: mode === "search" ? sparseFieldUsed : undefined,
+        indexType: await vectorIndexType(env),
         pymilvusQuery,
         count: results.length,
         timings: { understandMs, embedMs, seedMs, zillizMs, serverMs: Date.now() - t0 },
