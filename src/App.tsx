@@ -46,6 +46,9 @@ function countActive(f: Filters): number {
   if (f.minReviews) n++;
   if (f.category) n++;
   n += f.brands?.length ?? 0;
+  if (f.phrase) n++;
+  if (f.listedWithinDays) n++;
+  if (f.near) n++;
   return n;
 }
 
@@ -55,7 +58,6 @@ export function App() {
   // separate from the static `facets` lists above (Task 10 wires this into FilterPanel,
   // Task 12 into Diagnostics). `void` keeps it a no-op read until then.
   const [liveFacets, setLiveFacets] = useState<FacetsResponse | null>(null);
-  void liveFacets;
   const [query, setQuery] = useState(DEFAULT_QUERY); // search box text (not yet submitted)
   const [committedQuery, setCommittedQuery] = useState(DEFAULT_QUERY); // the submitted query that drives search
   const [filters, setFilters] = useState<Filters>({});
@@ -304,7 +306,7 @@ export function App() {
                 )}
               </div>
               {facets ? (
-                <FilterPanel facets={facets} filters={filters} onChange={patch} />
+                <FilterPanel facets={facets} filters={filters} onChange={patch} live={liveFacets} />
               ) : (
                 <p className="text-sm text-faint">Loading filters…</p>
               )}
@@ -377,7 +379,9 @@ export function App() {
                   />
                 </div>
               )}
-              {facets && <FilterPanel facets={facets} filters={filters} onChange={patch} />}
+              {facets && (
+                <FilterPanel facets={facets} filters={filters} onChange={patch} live={liveFacets} />
+              )}
             </div>
             <div className="flex gap-3 border-t border-line px-5 py-4">
               {activeFilters > 0 && (
