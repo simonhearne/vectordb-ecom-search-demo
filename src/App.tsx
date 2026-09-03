@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   Diagnostics,
   Facets,
+  FacetsResponse,
   Filters,
   ParsedQuery,
   Product,
@@ -9,7 +10,7 @@ import type {
   SortKey,
 } from "./lib/types";
 import { PAGE_SIZE, POOL_SIZE, DEFAULT_HYBRID_ALPHA } from "./lib/config";
-import { loadFacets, search } from "./lib/searchClient";
+import { fetchFacets, loadFacets, search } from "./lib/searchClient";
 import { Header } from "./components/Header";
 import { BlendSlider } from "./components/BlendSlider";
 import { FilterPanel } from "./components/FilterPanel";
@@ -47,6 +48,11 @@ function countActive(f: Filters): number {
 
 export function App() {
   const [facets, setFacets] = useState<Facets | null>(null);
+  // Live aggregate counts (total + price bounds) scoped to the current query/filters —
+  // separate from the static `facets` lists above (Task 10 wires this into FilterPanel,
+  // Task 12 into Diagnostics). `void` keeps it a no-op read until then.
+  const [liveFacets, setLiveFacets] = useState<FacetsResponse | null>(null);
+  void liveFacets;
   const [query, setQuery] = useState(DEFAULT_QUERY); // search box text (not yet submitted)
   const [committedQuery, setCommittedQuery] = useState(DEFAULT_QUERY); // the submitted query that drives search
   const [filters, setFilters] = useState<Filters>({});
@@ -80,6 +86,16 @@ export function App() {
   useEffect(() => {
     loadFacets().then(setFacets).catch(() => setFacets(null));
   }, []);
+
+  // Live facet counts: refetch when the committed query or the filters change (not on
+  // page/sort/blend changes). Best-effort — a failure just leaves the prior liveFacets.
+  useEffect(() => {
+    if (similarTo) return;
+    const q = committedQuery.trim();
+    fetchFacets({ q: embedText.current || q || undefined, filters })
+      .then(setLiveFacets)
+      .catch(() => {});
+  }, [committedQuery, filters, similarTo]);
 
   // Reset to first page whenever the committed query, similar seed, filters, or sort change.
   useEffect(() => {
