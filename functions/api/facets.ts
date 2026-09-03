@@ -10,11 +10,32 @@
  * is false), hence two separate `entities/query` calls run in parallel.
  */
 import type { FacetsRequest, FacetsResponse, Filters } from "../../src/lib/types";
-import { compileFilter, esc } from "../../src/lib/filter";
+import { compileFilter, dateCutoffIso, esc } from "../../src/lib/filter";
 
 const COLLECTION = "amazon_reviews_v3";
 const CACHE_TTL = 86400;
 const CACHE_KEY_BASE = "https://cache.vdb-ecom/api/facets";
+
+const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+
+// Canonical filters for the cache key: fixed key order + sorted brands so two semantically
+// equivalent filter objects (different key order, reordered brands) hash to one entry.
+// `compileFilter` was never designed to be cache-key-canonical (it renders `brands` in
+// array order) — duplicated from functions/api/search.ts's `canonicalFilters`, which the
+// same-origin edge-cache pattern here mirrors. Kept in sync manually; do not diverge.
+function canonicalFilters(f: Filters = {}): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (isNum(f.priceMin)) out.priceMin = f.priceMin;
+  if (isNum(f.priceMax)) out.priceMax = f.priceMax;
+  if (isNum(f.minRating)) out.minRating = f.minRating;
+  if (isNum(f.minReviews)) out.minReviews = f.minReviews;
+  if (f.brands?.length) out.brands = [...f.brands].sort();
+  if (f.category) out.category = f.category;
+  if (f.phrase?.trim()) out.phrase = f.phrase.trim();
+  if (isNum(f.listedWithinDays) && f.listedWithinDays > 0) out.listedCutoff = dateCutoffIso(f.listedWithinDays);
+  if (f.near?.city && isNum(f.near.km)) out.near = { city: f.near.city.trim().toLowerCase(), km: f.near.km };
+  return out;
+}
 
 interface Env {
   ZILLIZ_ENDPOINT: string;
@@ -65,7 +86,7 @@ export async function onRequestPost(ctx: Ctx): Promise<Response> {
   const q = (body.q ?? "").trim();
   const filters: Filters = body.filters ?? {};
   const now = new Date();
-  const key = `${CACHE_KEY_BASE}?k=${await sha256(JSON.stringify({ q, filters: compileFilter(filters, now) }))}`;
+  const key = `${CACHE_KEY_BASE}?k=${await sha256(JSON.stringify({ q, filters: canonicalFilters(filters) }))}`;
 
   let cache: Cache | undefined;
   try {
