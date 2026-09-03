@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "build:facets": "node scripts/build-facets.mjs",
+    "load:v3": ".venv/bin/python scripts/load_v3.py",
     "probe:v3": "node scripts/probe-v3.mjs",
     "preview": "npm run build && wrangler pages dev dist",
     "deploy": "npm run build && wrangler pages deploy dist",

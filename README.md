@@ -30,7 +30,7 @@ flowchart TB
     end
 
     subgraph zilliz["🗄️ Zilliz Cloud — Milvus"]
-        coll["Collection<br/><b>amazon_reviews</b><br/><i>text_vec · image_vec · text_sparse (BM25) · scalars</i>"]
+        coll["Collection<br/><b>amazon_reviews_v3</b><br/><i>text_vec · image_vec · text_sparse · text_syn_sparse · GEOMETRY · TIMESTAMPTZ</i>"]
     end
 
     spa -- "GET / (load app)" --> assets
@@ -71,11 +71,10 @@ flowchart TB
 - Node 20+ and npm.
 - A **Cloudflare account** with Workers AI (the `[ai]` binding proxies to real Workers AI
   even in local dev, so it incurs usage charges). Authenticate once: `npx wrangler login`.
-- A **Zilliz Cloud** cluster hosting the `amazon_reviews` collection (with a `text_sparse`
-  BM25 function field over `text_snippet`), and a **read-only API key** (see
-  [Security](#security)). The collection is built and ingested by
-  this [data-generation notebook](amazon_reviews_ingest.ipynb)
-  (embeds product text with Qwen3-Embedding-0.6B and images with SigLIP, then loads Milvus).
+- A **Zilliz Cloud** cluster hosting the `amazon_reviews_v3` collection — on this branch a
+  **dedicated Milvus 3.0-compatible cluster**, not the 2.x serverless one described below — and
+  a **read-only API key** (see [Security](#security)). Built by `scripts/load_v3.py`, not the
+  notebook; see [Milvus 3.0 branch](#milvus-30-branch) for how to load and verify it.
 
 ### Data-generation pipeline
 
@@ -138,11 +137,14 @@ npm install
 cp .dev.vars.example .dev.vars   # then fill in your Zilliz endpoint + read-only token
 ```
 
-`.dev.vars` (gitignored) holds local secrets:
+`.dev.vars` (gitignored) holds local secrets. On this branch, `ZILLIZ_ENDPOINT`/`ZILLIZ_TOKEN`
+point at the dedicated Milvus 3.0 cluster (`amazon_reviews_v3`), and a third variable
+(`ZILLIZ_WRITE_TOKEN`, a data-admin key) is needed only by the loader script:
 
 ```
-ZILLIZ_ENDPOINT=https://in03-xxxx.serverless.aws-eu-central-1.cloud.zilliz.com
-ZILLIZ_TOKEN=<read-only key>
+ZILLIZ_ENDPOINT=https://in01-xxxx.aws-eu-west-1.vectordb.zillizcloud.com:19530
+ZILLIZ_TOKEN=<read-only key, scoped to amazon_reviews_v3>
+ZILLIZ_WRITE_TOKEN=<data-admin key — scripts/load_v3.py only, never a Pages secret>
 ```
 
 ### Generate facet data
@@ -153,6 +155,72 @@ runtime distinct queries. Regenerate it from the live collection whenever the da
 ```bash
 npm run build:facets    # samples the collection -> public/facets.json
 ```
+
+## Milvus 3.0 branch
+
+This branch swaps the collection above for `amazon_reviews_v3` on a **dedicated Milvus
+3.0-compatible Zilliz Cloud cluster** and wires up the REST v2 features that cluster actually
+exposes — the same ones demonstrated, panel by panel, against Elasticsearch in the companion
+`milvus_es_lab` project. Not everything the lab shows made it through REST v2 on this build
+(see the table below); the aim is an honest transcript of what the API actually does, not a
+wish list.
+
+| UI control | Milvus 3.0 API | Lab panel |
+| --- | --- | --- |
+| `"exact phrase"` in the search box | `PHRASE_MATCH(text_snippet, phrase, 2)` filter | Phrase match |
+| Listed within 30 / 90 / 365 days · **New** badge | `first_seen > ISO '<cutoff>'` (TIMESTAMPTZ filter) | TIMESTAMPTZ |
+| Ships from within 250 / 1000 / 5000 km of a city | `st_dwithin(store_location, 'POINT (lon lat)', …)` (GEOMETRY + RTREE) | GEOMETRY / `st_dwithin` |
+| **Synonyms** toggle | BM25 over `text_syn_sparse` (synonym analyzer) vs. `text_sparse` | Synonyms |
+| **Fusion**: Weighted / RRF | `rerank:{strategy:"weighted"\|"rrf"}` on `entities/hybrid_search` | Hybrid `RRFRanker` |
+| **One per brand** toggle | `groupingField:"store", groupSize:1` | Grouped search |
+| **Boost**: cheaper / better rated / popular | `functionScore` decay reranker (`type:"Rerank"`, gauss/exp) — enabled only at the slider extremes | Decay rerank |
+| Live "N in catalogue matching your search" + price bounds | `entities/query` scalar aggregation (`count(*)`, `min`/`max(price)`) | Aggregations |
+| Sort → *Price: low to high* (browse only) | native `orderByFields` on `entities/query` | `order_by_fields` |
+| Diagnostics → Vector index | `indexes/describe` → `indexType` (`IVF_RABITQ`) | RaBitQ |
+| Empty-state "Try:" chips | dense retrieval + synonym analyzer absorbing a misspelling — no fuzziness claim | Typo gap |
+
+**Not on this cluster's REST v2** (so not in the app): result highlighting — cards show the
+plain snippet, never a marked-up one; live per-brand/category facet counts (GROUP BY isn't
+exposed on `entities/query`, so `public/facets.json` still supplies those lists); a
+token-preview (`run_analyzer` 404s over REST); decay boosting on `first_seen`; and any sort
+other than *browse + Price: low to high* pushed server-side — every other sort keeps this
+app's original over-fetch-and-sort (`POOL_SIZE`) approach.
+
+### Loading the data
+
+97,894 rows come from the `milvus_es_lab` project's Amazon-reviews parquet (pulled via that
+project's `fetch.py` from the `simonhearne/milvus-es-live-data` dataset on Hugging Face) —
+already embedded with the same Qwen3-Embedding-0.6B / SigLIP pipeline as this repo's own
+notebook, so no re-embedding is needed:
+
+```bash
+uv venv --python 3.13 .venv && uv pip install -r scripts/requirements-v3.txt   # once
+npm run load:v3 -- --drop     # (re)creates amazon_reviews_v3 and loads all rows
+```
+
+Reads `ZILLIZ_ENDPOINT` + `ZILLIZ_WRITE_TOKEN` (a data-admin key, `.dev.vars` only — the app's
+own `ZILLIZ_TOKEN` stays read-only) from `.dev.vars`. `--schema-only` prints the schema without
+touching data; `--limit N` runs a small validation load; `--reanchor` re-upserts just
+`first_seen` — run it before a demo if the collection is more than 30 days old, or "Listed
+within 30 days" will return nothing.
+
+### Verifying
+
+```bash
+npm run probe:v3   # read-only REST v2 capability probe; PASS/FAIL per feature above
+```
+
+Its output is the source for `functions/api/rest.ts` and the design spec's "Verified facts"
+table. Query-embedding parity between Workers AI and the parquet's stored vectors still needs
+confirming per cluster: `wrangler login`, `npm run dev`, then six `POST /api/search` calls with
+exact product titles at `alpha: 1` (expect the seed product at rank 1) — see `CLAUDE.md`.
+
+### Preview
+
+This branch deploys to the **preview** environment of the existing `vdb-ecom` Pages project:
+**[milvus-3-0.vdb-ecom.pages.dev](https://milvus-3-0.vdb-ecom.pages.dev/)**. Preview-environment
+secrets are shared across branches, so other preview deploys will also hit the 3.0 cluster
+while these are set.
 
 ## Local development
 

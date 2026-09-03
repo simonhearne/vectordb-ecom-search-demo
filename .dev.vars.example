@@ -1,5 +1,9 @@
 # Copy to `.dev.vars` (gitignored) and fill in. Used by `wrangler pages dev` and scripts.
-# Zilliz Cloud cluster public endpoint, e.g. https://in03-xxxx.serverless.aws-eu-central-1.cloud.zilliz.com
+# Zilliz Cloud cluster public endpoint — on the milvus-3.0 branch this must be the Milvus
+# 3.0-compatible instance hosting amazon_reviews_v3 (dedicated cluster, not 2.x serverless)
 ZILLIZ_ENDPOINT=
 # Zilliz read-only API key (role limited to Search/Query/Describe on this cluster+collection)
 ZILLIZ_TOKEN=
+# Zilliz data-admin key — used only by scripts/load_v3.py to (re)build amazon_reviews_v3.
+# Never used by the app itself and never set as a Pages secret.
+#ZILLIZ_WRITE_TOKEN=
