@@ -19,7 +19,7 @@ import { SearchControls } from "./components/SearchControls";
 import { FilterPanel } from "./components/FilterPanel";
 import { ProductGrid } from "./components/ProductGrid";
 import { Pagination } from "./components/Pagination";
-import { LoadingGrid, EmptyState, ErrorState } from "./components/States";
+import { LoadingGrid, EmptyState, ErrorState, TryQueries } from "./components/States";
 import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
 import { InterpretationNote } from "./components/InterpretationNote";
 import { SimilarNote } from "./components/SimilarNote";
@@ -323,6 +323,19 @@ export function App() {
                 onDismiss={() => setInterpretation(null)}
               />
             ) : null}
+
+            {!similarTo && !interpretation && (
+              <TryQueries
+                onPick={(q) => {
+                  setQuery(q);
+                  setSimilarTo(null);
+                  embedText.current = "";
+                  setFilters({});
+                  setInterpretation(null);
+                  setCommittedQuery(q);
+                }}
+              />
+            )}
 
             <div className="mb-5 flex items-baseline justify-between gap-4">
               <p className="text-sm text-muted" aria-live="polite">
