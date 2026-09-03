@@ -25,3 +25,6 @@ dist/
 
 # local tool caches
 .memsearch/
+
+# python venv for scripts/load_v3.py
+.venv/
