@@ -182,12 +182,14 @@ def main():
     total = min(table.num_rows, a.limit) if a.limit else table.num_rows
 
     if a.reanchor:
+        if not client.has_collection(COLLECTION):
+            sys.exit(f"{COLLECTION} does not exist; run without --reanchor first")
         # Re-upsert only the date column so "listed within 30 days" is live again.
         # Upsert needs the full row on serverless, so we re-send full rows.
         print(f"re-anchoring first_seen for {total} rows")
         for start in range(0, total, BATCH):
             client.upsert(COLLECTION, rows_from(table, start, min(start + BATCH, total)))
-            print(f"  {min(start + BATCH, total)}/{total}", end="\r")
+            print(f"  {min(start + BATCH, total)}/{total}", end="\r", flush=True)
         client.flush(COLLECTION)
         print("\ndone")
         return
@@ -202,7 +204,7 @@ def main():
     t0 = time.time()
     for start in range(0, total, BATCH):
         client.insert(COLLECTION, rows_from(table, start, min(start + BATCH, total)))
-        print(f"  inserted {min(start + BATCH, total)}/{total}", end="\r")
+        print(f"  inserted {min(start + BATCH, total)}/{total}", end="\r", flush=True)
     print(f"\ninsert took {time.time() - t0:.0f}s; flushing")
     client.flush(COLLECTION)
     wait_compaction(client)
