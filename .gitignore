@@ -28,3 +28,6 @@ dist/
 
 # python venv for scripts/load_v3.py
 .venv/
+
+# superpowers SDD scratch
+.superpowers/
