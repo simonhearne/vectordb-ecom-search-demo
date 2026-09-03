@@ -1,6 +1,8 @@
 import { useState } from "react";
 import type { Product } from "../lib/types";
 import { hasPrice } from "../lib/types";
+import { daysSince } from "../lib/highlight";
+import { NEW_BADGE_DAYS } from "../lib/config";
 import { Stars } from "./Stars";
 import { ImageOffIcon, SimilarIcon } from "./icons";
 
@@ -47,6 +49,11 @@ export function ProductCard({
             {p.store}
           </span>
         )}
+        {p.first_seen && daysSince(p.first_seen) <= NEW_BADGE_DAYS && (
+          <span className="absolute right-3 top-3 rounded-full bg-accent px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white">
+            New
+          </span>
+        )}
         {onMoreLikeThis && (
           <button
             type="button"
@@ -81,6 +88,10 @@ export function ProductCard({
             <span className="text-faint">No ratings yet</span>
           )}
         </div>
+
+        {p.store_city && (
+          <span className="text-[11px] text-faint">Ships from {p.store_city}</span>
+        )}
 
         <div className="mt-auto flex items-end justify-between gap-2 pt-1">
           {hasPrice(p.price) ? (
