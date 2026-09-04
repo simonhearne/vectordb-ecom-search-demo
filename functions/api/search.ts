@@ -61,7 +61,10 @@ const OUTPUT_FIELDS = [
   "store_city",
 ];
 
-// Zilliz serverless caps (from docs): limit <= 1024, limit + offset < 16384.
+// This branch's cluster is dedicated (not serverless) and accepts limit up to 16384
+// (see npm run probe:v3 / CLAUDE.md STEP 0 findings). The serverless clamps below are
+// kept deliberately anyway, so the proxy behaves the same regardless of which cluster
+// it's pointed at.
 const MAX_LIMIT = 1024;
 const MAX_WINDOW = 16384;
 
@@ -422,7 +425,8 @@ function canonicalFilters(f: Filters = {}): Record<string, unknown> {
   if (f.phrase?.trim()) out.phrase = f.phrase.trim();
   // Key on the day-rounded cutoff, not the raw day count: that is what the compiled filter
   // actually carries, so two requests a minute apart still share one entry.
-  if (isNum(f.listedWithinDays) && f.listedWithinDays > 0) out.listedCutoff = dateCutoffIso(f.listedWithinDays);
+  if (isNum(f.listedWithinDays) && f.listedWithinDays > 0 && f.listedWithinDays <= 3650)
+    out.listedCutoff = dateCutoffIso(f.listedWithinDays);
   if (f.near?.city && isNum(f.near.km)) out.near = { city: f.near.city.trim().toLowerCase(), km: f.near.km };
   return out;
 }
@@ -639,6 +643,7 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
       if (Array.isArray(imageVec) && imageVec.length) {
         // Blend semantic-text and visual similarity via reciprocal-rank fusion.
         annsField = "text_vec + image_vec (rrf)";
+        ranker = "RRFRanker(60)";
         pymilvusQuery = pyHybrid({
           reqs: [
             { data: "[seed_text_vec]", annsField: "text_vec", filter: subFilter, limit: subLimit },
@@ -841,7 +846,7 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
       results = ranked.slice(offset, offset + limit);
       total = ranked.length; // candidate-pool count (capped at POOL_SIZE)
     } else {
-      results = pool; // native relevance page, already windowed at the DB
+      results = pool; // native DB-ordered page (relevance, or the browse price-ascending order_by)
     }
     const payload: SearchResponse = {
       results,

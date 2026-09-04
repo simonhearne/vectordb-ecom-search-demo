@@ -51,7 +51,7 @@ export interface Product {
   title: string;
   main_category?: string;
   store?: string;
-  price?: number; // -1 = unknown (data contains sentinels despite ingest claim)
+  price?: number; // v3 data has no -1 sentinels (min $0.0099, no nulls); hasPrice() is kept for safety anyway
   average_rating?: number;
   rating_number?: number;
   categories?: string[];

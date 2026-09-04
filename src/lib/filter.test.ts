@@ -26,6 +26,12 @@ describe("compileFilter", () => {
   it("ignores an unknown city", () => {
     expect(compileFilter({ near: { city: "Atlantis", km: 250 } }, NOW)).toBe("");
   });
+  it("ignores a non-finite listedWithinDays", () => {
+    expect(compileFilter({ listedWithinDays: 1e300 }, NOW)).toBe("");
+  });
+  it("ignores a negative listedWithinDays", () => {
+    expect(compileFilter({ listedWithinDays: -5 }, NOW)).toBe("");
+  });
 });
 
 describe("dateCutoffIso", () => {
@@ -49,6 +55,12 @@ describe("extractPhrase", () => {
   });
   it("ignores an unclosed quote", () => {
     expect(extractPhrase('"lonely quote hub')).toEqual({ phrase: null, rest: '"lonely quote hub' });
+  });
+  it("treats $-patterns in the phrase as literal, not replacement tokens", () => {
+    expect(extractPhrase('"cheap $& deal" gadget')).toEqual({
+      phrase: "cheap $& deal",
+      rest: "cheap $& deal gadget",
+    });
   });
 });
 

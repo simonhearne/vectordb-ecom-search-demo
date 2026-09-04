@@ -32,7 +32,8 @@ function canonicalFilters(f: Filters = {}): Record<string, unknown> {
   if (f.brands?.length) out.brands = [...f.brands].sort();
   if (f.category) out.category = f.category;
   if (f.phrase?.trim()) out.phrase = f.phrase.trim();
-  if (isNum(f.listedWithinDays) && f.listedWithinDays > 0) out.listedCutoff = dateCutoffIso(f.listedWithinDays);
+  if (isNum(f.listedWithinDays) && f.listedWithinDays > 0 && f.listedWithinDays <= 3650)
+    out.listedCutoff = dateCutoffIso(f.listedWithinDays);
   if (f.near?.city && isNum(f.near.km)) out.near = { city: f.near.city.trim().toLowerCase(), km: f.near.km };
   return out;
 }
@@ -86,10 +87,14 @@ export async function onRequestPost(ctx: Ctx): Promise<Response> {
   const q = (body.q ?? "").trim();
   const filters: Filters = body.filters ?? {};
   const now = new Date();
-  const key = `${CACHE_KEY_BASE}?k=${await sha256(JSON.stringify({ q, filters: canonicalFilters(filters) }))}`;
 
+  // Best-effort cache lookup — key derivation (canonicalFilters/sha256) lives inside this
+  // try too, so an error there (or in the Cache API itself) can never escape as an
+  // unhandled exception; it just falls through to a live run with no cache.
   let cache: Cache | undefined;
+  let key: string | undefined;
   try {
+    key = `${CACHE_KEY_BASE}?k=${await sha256(JSON.stringify({ q, filters: canonicalFilters(filters) }))}`;
     cache = (caches as unknown as { default: Cache }).default;
     const hit = await cache.match(key);
     if (hit) {
@@ -99,6 +104,7 @@ export async function onRequestPost(ctx: Ctx): Promise<Response> {
     }
   } catch {
     cache = undefined;
+    key = undefined;
   }
 
   try {
@@ -122,7 +128,7 @@ export async function onRequestPost(ctx: Ctx): Promise<Response> {
       },
     };
     const res = json(payload, 200);
-    if (cache) {
+    if (cache && key) {
       try {
         const stored = new Response(res.clone().body, {
           status: 200,

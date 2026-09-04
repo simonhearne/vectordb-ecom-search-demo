@@ -55,8 +55,8 @@ function countActive(f: Filters): number {
 export function App() {
   const [facets, setFacets] = useState<Facets | null>(null);
   // Live aggregate counts (total + price bounds) scoped to the current query/filters —
-  // separate from the static `facets` lists above (Task 10 wires this into FilterPanel,
-  // Task 12 into Diagnostics). `void` keeps it a no-op read until then.
+  // separate from the static `facets` lists above. Feeds FilterPanel's live count/bounds
+  // and the diagnostics panel's facet-aggregation section.
   const [liveFacets, setLiveFacets] = useState<FacetsResponse | null>(null);
   const [query, setQuery] = useState(DEFAULT_QUERY); // search box text (not yet submitted)
   const [committedQuery, setCommittedQuery] = useState(DEFAULT_QUERY); // the submitted query that drives search
