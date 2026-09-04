@@ -1,21 +1,25 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
+  Boost,
   Diagnostics,
   Facets,
+  FacetsResponse,
   Filters,
+  Fusion,
   ParsedQuery,
   Product,
   SearchRequest,
   SortKey,
 } from "./lib/types";
 import { PAGE_SIZE, POOL_SIZE, DEFAULT_HYBRID_ALPHA } from "./lib/config";
-import { loadFacets, search } from "./lib/searchClient";
+import { fetchFacets, loadFacets, search } from "./lib/searchClient";
 import { Header } from "./components/Header";
 import { BlendSlider } from "./components/BlendSlider";
+import { SearchControls } from "./components/SearchControls";
 import { FilterPanel } from "./components/FilterPanel";
 import { ProductGrid } from "./components/ProductGrid";
 import { Pagination } from "./components/Pagination";
-import { LoadingGrid, EmptyState, ErrorState } from "./components/States";
+import { LoadingGrid, EmptyState, ErrorState, TryQueries } from "./components/States";
 import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
 import { InterpretationNote } from "./components/InterpretationNote";
 import { SimilarNote } from "./components/SimilarNote";
@@ -42,11 +46,18 @@ function countActive(f: Filters): number {
   if (f.minReviews) n++;
   if (f.category) n++;
   n += f.brands?.length ?? 0;
+  if (f.phrase) n++;
+  if (f.listedWithinDays) n++;
+  if (f.near) n++;
   return n;
 }
 
 export function App() {
   const [facets, setFacets] = useState<Facets | null>(null);
+  // Live aggregate counts (total + price bounds) scoped to the current query/filters —
+  // separate from the static `facets` lists above. Feeds FilterPanel's live count/bounds
+  // and the diagnostics panel's facet-aggregation section.
+  const [liveFacets, setLiveFacets] = useState<FacetsResponse | null>(null);
   const [query, setQuery] = useState(DEFAULT_QUERY); // search box text (not yet submitted)
   const [committedQuery, setCommittedQuery] = useState(DEFAULT_QUERY); // the submitted query that drives search
   const [filters, setFilters] = useState<Filters>({});
@@ -54,6 +65,11 @@ export function App() {
   // Dense/semantic blend (α): a global relevance preference that persists across queries,
   // "More like this", and clear — only sent (and shown) in search mode.
   const [alpha, setAlpha] = useState(DEFAULT_HYBRID_ALPHA);
+  // Milvus 3.0 search controls — persist across queries like α, sent only in search mode.
+  const [fusion, setFusion] = useState<Fusion>("weighted");
+  const [synonyms, setSynonyms] = useState(true);
+  const [groupByBrand, setGroupByBrand] = useState(false);
+  const [boost, setBoost] = useState<Boost | null>(null);
   const [page, setPage] = useState(0);
   const [nonce, setNonce] = useState(0);
 
@@ -75,16 +91,43 @@ export function App() {
   // keeps the user's original text, but we still search the clean text so the stripped
   // filter phrases ("under $60") don't pollute the embedding. Empty until understood.
   const embedText = useRef("");
+  // The most recently resolved facets debug payload, kept outside React state so the search
+  // effect's `.then` can read it synchronously instead of through a closure over `liveFacets`
+  // (which would be stale — fixed at the render that started this effect run, not at response
+  // time). The facets effect writes this the instant its response lands, before setLiveFacets.
+  const facetsDebugRef = useRef<FacetsResponse["debug"] | undefined>(undefined);
   const activeFilters = useMemo(() => countActive(filters), [filters]);
 
   useEffect(() => {
     loadFacets().then(setFacets).catch(() => setFacets(null));
   }, []);
 
+  // Live facet counts: refetch when the committed query or the filters change (not on
+  // page/sort/blend changes). Best-effort — a failure just leaves the prior liveFacets.
+  useEffect(() => {
+    if (similarTo) {
+      // A similar-mode search never carries a facet aggregation — clear the ref so a
+      // subsequent search effect run can't attach a stale query's facets to it.
+      facetsDebugRef.current = undefined;
+      return;
+    }
+    const q = committedQuery.trim();
+    fetchFacets({ q: embedText.current || q || undefined, filters })
+      .then((res) => {
+        // Write the ref synchronously, before setLiveFacets, so the search effect's `.then`
+        // (which may resolve before or after this one) always reads the current query's
+        // facets rather than a stale closure value.
+        facetsDebugRef.current = res.debug;
+        setLiveFacets(res);
+        setDiag((d) => (d ? { ...d, facets: res.debug } : d));
+      })
+      .catch(() => {});
+  }, [committedQuery, filters, similarTo]);
+
   // Reset to first page whenever the committed query, similar seed, filters, or sort change.
   useEffect(() => {
     setPage(0);
-  }, [committedQuery, similarTo, filters, sort, alpha]);
+  }, [committedQuery, similarTo, filters, sort, alpha, fusion, synonyms, groupByBrand, boost]);
 
   // Fetch on any input change. reqId guards against out-of-order responses.
   useEffect(() => {
@@ -114,8 +157,9 @@ export function App() {
           limit: PAGE_SIZE,
           offset: page * PAGE_SIZE,
           understand,
-          // Blend only applies to a real query search (BM25 needs query text); omit for browse.
-          ...(rawQ !== "" ? { alpha } : {}),
+          // Blend/controls only apply to a real query search (BM25 needs query text); omit
+          // for browse.
+          ...(rawQ !== "" ? { alpha, fusion, synonyms, groupByBrand, boost } : {}),
         };
     const started = performance.now();
     search(request)
@@ -124,7 +168,12 @@ export function App() {
         setResults(res.results);
         setTotal(res.total ?? null);
         setMode(res.mode);
-        setDiag({ request, response: res, clientMs: Math.round(performance.now() - started) });
+        setDiag({
+          request,
+          response: res,
+          clientMs: Math.round(performance.now() - started),
+          facets: facetsDebugRef.current,
+        });
 
         // Adopt the proxy's interpretation: keep the user's original text in the box, but
         // remember the cleaned query to embed on follow-up fetches, and merge implied
@@ -151,7 +200,7 @@ export function App() {
       .finally(() => {
         if (id === reqId.current) setLoading(false);
       });
-  }, [committedQuery, similarTo, filters, sort, alpha, page, nonce]);
+  }, [committedQuery, similarTo, filters, sort, alpha, fusion, synonyms, groupByBrand, boost, page, nonce]);
 
   const patch = (p: Partial<Filters>) => setFilters((prev) => ({ ...prev, ...p }));
   const clearFilters = () => {
@@ -211,6 +260,14 @@ export function App() {
   // The blend control is only meaningful in search mode (a committed query, not similarity).
   const showBlend = committedQuery.trim() !== "" && !similarTo;
 
+  // RRF fusion and a blended α (neither pure keyword nor pure semantic) both run two
+  // rerankers already — Milvus allows only one, so the decay boost can't stack on top.
+  // Purely client-side: mirrors the proxy's own α=0/α=1-only boost rule.
+  const hybrid = fusion === "rrf" || (alpha > 0 && alpha < 1);
+  const boostDisabledReason = hybrid
+    ? "Boost applies at the Keyword or Semantic extremes of the slider (Milvus runs one reranker per search)"
+    : undefined;
+
   const summary = () => {
     if (loading) return "Searching…";
     // On a sorted page, report the pool count (with "+" when the pool was truncated at the
@@ -242,6 +299,16 @@ export function App() {
         alpha={alpha}
         onAlpha={setAlpha}
         showBlend={showBlend}
+        blendDisabled={fusion === "rrf"}
+        controls={
+          <SearchControls
+            fusion={fusion} onFusion={setFusion}
+            synonyms={synonyms} onSynonyms={setSynonyms}
+            groupByBrand={groupByBrand} onGroupByBrand={setGroupByBrand}
+            boost={boost} onBoost={setBoost}
+            boostDisabledReason={boostDisabledReason}
+          />
+        }
       />
 
       <main className="mx-auto max-w-[1400px] px-4 py-6 sm:px-6 lg:py-10">
@@ -261,7 +328,7 @@ export function App() {
                 )}
               </div>
               {facets ? (
-                <FilterPanel facets={facets} filters={filters} onChange={patch} />
+                <FilterPanel facets={facets} filters={filters} onChange={patch} live={liveFacets} />
               ) : (
                 <p className="text-sm text-faint">Loading filters…</p>
               )}
@@ -278,6 +345,19 @@ export function App() {
                 onDismiss={() => setInterpretation(null)}
               />
             ) : null}
+
+            {!similarTo && !interpretation && (
+              <TryQueries
+                onPick={(q) => {
+                  setQuery(q);
+                  setSimilarTo(null);
+                  embedText.current = "";
+                  setFilters({});
+                  setInterpretation(null);
+                  setCommittedQuery(q);
+                }}
+              />
+            )}
 
             <div className="mb-5 flex items-baseline justify-between gap-4">
               <p className="text-sm text-muted" aria-live="polite">
@@ -323,11 +403,20 @@ export function App() {
             </div>
             <div className="flex-1 overflow-y-auto px-5 py-2">
               {showBlend && (
-                <div className="mb-4 border-b border-line pb-4 pt-2">
-                  <BlendSlider alpha={alpha} onChange={setAlpha} />
+                <div className="mb-4 flex flex-col gap-3 border-b border-line pb-4 pt-2">
+                  <BlendSlider alpha={alpha} onChange={setAlpha} disabled={fusion === "rrf"} />
+                  <SearchControls
+                    fusion={fusion} onFusion={setFusion}
+                    synonyms={synonyms} onSynonyms={setSynonyms}
+                    groupByBrand={groupByBrand} onGroupByBrand={setGroupByBrand}
+                    boost={boost} onBoost={setBoost}
+                    boostDisabledReason={boostDisabledReason}
+                  />
                 </div>
               )}
-              {facets && <FilterPanel facets={facets} filters={filters} onChange={patch} />}
+              {facets && (
+                <FilterPanel facets={facets} filters={filters} onChange={patch} live={liveFacets} />
+              )}
             </div>
             <div className="flex gap-3 border-t border-line px-5 py-4">
               {activeFilters > 0 && (

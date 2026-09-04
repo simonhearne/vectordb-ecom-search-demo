@@ -67,6 +67,20 @@ export function DiagnosticsPanel({ diag }: { diag: Diagnostics }) {
             <Metric label="Embedding dim" value={d?.embedDim ?? "—"} />
             <Metric label="Understanding" value={d?.understandModel ?? "off / not run"} mono />
             <Metric
+              label="Sort (server)"
+              value={
+                d?.orderBy
+                  ? `${d.orderBy.map((o) => `${o.field} ${o.order}`).join(", ")}${d.orderBySemantics ? ` · ${d.orderBySemantics}` : ""}`
+                  : d?.pool
+                    ? `pool ${d.pool} · client-side`
+                    : "relevance"
+              }
+            />
+            <Metric label="Group by" value={d?.groupBy ?? "—"} />
+            <Metric label="Ranker" value={d?.ranker ?? "—"} mono />
+            <Metric label="Sparse field" value={d?.sparseField ?? "—"} mono />
+            <Metric label="Vector index" value={d?.indexType ?? "—"} mono />
+            <Metric
               label="Latency"
               value={
                 <span className="tabular-nums">
@@ -90,6 +104,15 @@ export function DiagnosticsPanel({ diag }: { diag: Diagnostics }) {
               <span className="eyebrow">Effective pymilvus query</span>
               <pre className="mt-1.5 overflow-x-auto rounded-lg bg-paper px-3 py-2.5 font-mono text-xs leading-relaxed text-ink whitespace-pre">
                 {d.pymilvusQuery}
+              </pre>
+            </div>
+          )}
+
+          {diag.facets && (
+            <div className="mt-5">
+              <span className="eyebrow">Facet aggregation · {diag.facets.zillizMs} ms</span>
+              <pre className="mt-1.5 overflow-x-auto rounded-lg bg-paper px-3 py-2.5 font-mono text-xs leading-relaxed text-ink whitespace-pre">
+                {diag.facets.pymilvusQuery}
               </pre>
             </div>
           )}

@@ -1,6 +1,6 @@
 // Single front-end seam for all DB access. Everything goes through the same-origin
 // Pages Function proxy — the browser never talks to Zilliz directly.
-import type { Facets, SearchRequest, SearchResponse } from "./types";
+import type { Facets, FacetsRequest, FacetsResponse, SearchRequest, SearchResponse } from "./types";
 
 export async function search(req: SearchRequest): Promise<SearchResponse> {
   const res = await fetch("/api/search", {
@@ -19,6 +19,22 @@ export async function loadFacets(): Promise<Facets> {
   const res = await fetch("/facets.json");
   if (!res.ok) throw new Error("Could not load facets.json");
   return (await res.json()) as Facets;
+}
+
+// Live facet counts (total + price bounds) scoped to the current query/filters, via
+// /api/facets aggregation. Static brand/category lists still come from loadFacets() above —
+// GROUP BY isn't available on this cluster, so those lists stay pre-built.
+export async function fetchFacets(req: FacetsRequest): Promise<FacetsResponse> {
+  const res = await fetch("/api/facets", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error || `Facets failed (${res.status})`);
+  }
+  return (await res.json()) as FacetsResponse;
 }
 
 // "More like this" reuses search() — pass `similarTo: parent_asin` and the proxy seeds the

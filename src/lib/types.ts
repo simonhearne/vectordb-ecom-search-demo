@@ -5,7 +5,11 @@ export type SortKey =
   | "price_asc"
   | "price_desc"
   | "rating"
-  | "reviews";
+  | "reviews"
+  | "newest";
+
+export type Boost = "cheaper" | "rated" | "popular" | "newest";
+export type Fusion = "weighted" | "rrf";
 
 export interface Filters {
   priceMin?: number | null;
@@ -14,6 +18,9 @@ export interface Filters {
   minReviews?: number | null;
   brands?: string[]; // matches `store`
   category?: string | null;
+  phrase?: string | null; // exact phrase → PHRASE_MATCH(text_snippet, phrase, 2)
+  listedWithinDays?: number | null; // → first_seen > ISO '<cutoff>'
+  near?: { city: string; km: number } | null; // → st_dwithin(store_location, POINT, m)
 }
 
 export interface SearchRequest {
@@ -25,6 +32,10 @@ export interface SearchRequest {
   understand?: boolean; // run NL query understanding on q (default true when q present)
   similarTo?: string; // parent_asin — "More like this": seed similarity from a product's stored vectors
   alpha?: number; // dense/semantic weight 0..1 for hybrid search (defaults to DEFAULT_HYBRID_ALPHA server-side)
+  fusion?: Fusion; // default "weighted"; α only applies to weighted
+  synonyms?: boolean; // default true → text_syn_sparse, else text_sparse
+  groupByBrand?: boolean; // → groupingField "store", groupSize 1
+  boost?: Boost | null; // → decay reranker
 }
 
 // Result of natural-language query understanding on the proxy.
@@ -40,12 +51,14 @@ export interface Product {
   title: string;
   main_category?: string;
   store?: string;
-  price?: number; // -1 = unknown (data contains sentinels despite ingest claim)
+  price?: number; // v3 data has no -1 sentinels (min $0.0099, no nulls); hasPrice() is kept for safety anyway
   average_rating?: number;
   rating_number?: number;
   categories?: string[];
   image_url?: string;
   text_snippet?: string;
+  first_seen?: string; // RFC3339
+  store_city?: string;
   score?: number; // relevance score; meaning varies by strategy (cosine for dense, BM25 for sparse, fused for weighted)
 }
 
@@ -59,7 +72,13 @@ export interface SearchDebug {
   offset: number;
   pool?: number; // candidate pool over-fetched and sorted (set only on scalar sorts)
   alpha?: number; // resolved dense/semantic weight 0..1 (search mode)
-  strategy?: "dense" | "sparse" | "weighted"; // active blend strategy (search mode)
+  strategy?: "dense" | "sparse" | "weighted" | "rrf"; // active blend strategy (search mode)
+  orderBy?: { field: string; order: "asc" | "desc" }[];
+  orderBySemantics?: "window" | "whole-set";
+  groupBy?: string;
+  ranker?: string; // human-readable ranker: WeightedRanker(...) / RRFRanker(60) / FunctionScore(...)
+  sparseField?: "text_sparse" | "text_syn_sparse";
+  indexType?: string; // vector index type from indexes/describe
   pymilvusQuery?: string; // the effective pymilvus call equivalent to the REST request issued
   count: number;
   timings: { understandMs?: number; embedMs?: number; seedMs?: number; zillizMs: number; serverMs: number };
@@ -78,6 +97,7 @@ export interface Diagnostics {
   request: SearchRequest;
   response: SearchResponse;
   clientMs: number;
+  facets?: FacetsResponse["debug"];
 }
 
 export interface Facets {
@@ -87,6 +107,31 @@ export interface Facets {
   priceMax: number;
   generatedAt?: string;
   sampleSize?: number;
+}
+
+export interface FacetsRequest {
+  q?: string;
+  filters?: Filters;
+}
+
+export interface FacetBucket {
+  value: string;
+  count: number;
+}
+
+export interface FacetsResponse {
+  total: number; // count(*) under the current filter (+ TEXT_MATCH when a query is committed)
+  priceMin: number;
+  priceMax: number;
+  // Per-value counts, computed in the proxy from the matching rows' `store` / `categories`
+  // (no GROUP BY over REST on this cluster). Standard faceting: brand counts ignore the
+  // brand filter, category counts ignore the category filter, so alternatives stay visible.
+  brands: FacetBucket[];
+  categories: FacetBucket[];
+  // false when a set exceeded the row cap and counts come from the first `sampled` rows.
+  exact: boolean;
+  sampled: number;
+  debug: { filter: string; pymilvusQuery: string; zillizMs: number };
 }
 
 export const PRICE_UNKNOWN = -1;

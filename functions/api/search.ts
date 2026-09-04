@@ -4,16 +4,37 @@
  * The browser never sees the DB key and never calls Zilliz directly.
  */
 import type {
+  Boost,
   Filters,
+  Fusion,
   Product,
   SearchRequest,
   SearchResponse,
   SortKey,
 } from "../../src/lib/types";
 import { POOL_SIZE, DEFAULT_HYBRID_ALPHA } from "../../src/lib/config";
+import { compileFilter, dateCutoffIso, esc, extractPhrase } from "../../src/lib/filter";
+import type { QueryMode } from "./rest";
+import {
+  CAPS,
+  decayParam,
+  groupParam,
+  highlighterParam,
+  nativeOrderByFields,
+  orderByFor,
+  orderByParam,
+  REST_NAMES,
+  pyGroup,
+  pyHighlighter,
+  pyList,
+  pyOrderBy,
+  pyRanker,
+  rrfRerank,
+  weightedRerank,
+} from "./rest";
 
 const MODEL = "@cf/qwen/qwen3-embedding-0.6b";
-const COLLECTION = "amazon_reviews";
+const COLLECTION = "amazon_reviews_v3";
 const ANNS_FIELD = "text_vec";
 // Chosen in STEP 0: the instruction-prefixed `queries` form aligns NL queries with the
 // plain-embedded documents and gives clean ranking (parity 6/6, mean cosine ~0.87).
@@ -36,9 +57,14 @@ const OUTPUT_FIELDS = [
   "categories",
   "image_url",
   "text_snippet",
+  "first_seen",
+  "store_city",
 ];
 
-// Zilliz serverless caps (from docs): limit <= 1024, limit + offset < 16384.
+// This branch's cluster is dedicated (not serverless) and accepts limit up to 16384
+// (see npm run probe:v3 / CLAUDE.md STEP 0 findings). The serverless clamps below are
+// kept deliberately anyway, so the proxy behaves the same regardless of which cluster
+// it's pointed at.
 const MAX_LIMIT = 1024;
 const MAX_WINDOW = 16384;
 
@@ -71,49 +97,28 @@ const CACHE_KEY_BASE = "https://cache.vdb-ecom/api/search";
 const isNum = (v: unknown): v is number =>
   typeof v === "number" && Number.isFinite(v);
 
-// Escape a string for safe interpolation inside a double-quoted Milvus literal.
-const esc = (s: string): string => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-
-function compileFilter(f: Filters = {}): string {
-  const clauses: string[] = [];
-  // Any price bound implies the user wants known prices — exclude the -1 sentinels.
-  if (isNum(f.priceMin) || isNum(f.priceMax)) clauses.push(`price > 0`);
-  if (isNum(f.priceMin)) clauses.push(`price >= ${f.priceMin}`);
-  if (isNum(f.priceMax)) clauses.push(`price <= ${f.priceMax}`);
-  if (isNum(f.minRating)) clauses.push(`average_rating >= ${f.minRating}`);
-  if (isNum(f.minReviews)) clauses.push(`rating_number >= ${f.minReviews}`);
-  if (f.brands?.length) {
-    const list = f.brands.map((b) => `"${esc(b)}"`).join(", ");
-    clauses.push(`store in [${list}]`);
-  }
-  if (f.category) clauses.push(`array_contains(categories, "${esc(f.category)}")`);
-  return clauses.join(" and ");
-}
-
 // --- Effective pymilvus query rendering ----------------------------------------------
 // The proxy talks Zilliz REST v2, but the diagnostics panel shows the equivalent pymilvus
 // (MilvusClient) call so the active search is legible as code. These builders mirror — and
 // are driven by — the exact params handed to each REST branch below.
 
-// Trim float noise (e.g. 1 - 0.7 -> 0.30000000000000004) for readable weights.
-const pyNum = (n: number) => String(Number(n.toFixed(4)));
-
 // Python string literal for arbitrary text (data values, comments).
 const pyStr = (s: string) =>
   `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n")}"`;
-
-// Python list of string literals.
-const pyList = (items: string[]) => `[${items.map((s) => `"${s}"`).join(", ")}]`;
 
 // Filter expressions carry their own double-quoted Milvus literals, so render them with
 // triple quotes to avoid escaping noise; "" when there is no filter.
 const pyFilter = (s: string) => (s ? `"""${s}"""` : '""');
 
-function pyQuery(filter: string, limit: number, offset: number): string {
+// `client.query` is the browse branch, hence the fixed "browse" mode: it is the only
+// call `orderByFields` exists on (probe 2), so it is the only transcript that can carry
+// an `order_by_fields=` line.
+function pyQuery(filter: string, limit: number, offset: number, sort: SortKey): string {
   return [
     `client.query(`,
     `    collection_name="${COLLECTION}",`,
     `    filter=${pyFilter(filter)},`,
+    ...pyOrderBy(sort, "browse"),
     `    limit=${limit},`,
     `    offset=${offset},`,
     `    output_fields=${pyList(OUTPUT_FIELDS)},`,
@@ -128,6 +133,12 @@ function pySearch(opts: {
   filter: string;
   limit: number;
   offset: number;
+  sort?: SortKey;
+  mode?: QueryMode;
+  group?: boolean;
+  highlight?: boolean;
+  // The FunctionScore rendering of a decay boost — only the single-field paths carry one.
+  ranker?: string | null;
 }): string {
   return [
     `client.search(`,
@@ -135,6 +146,10 @@ function pySearch(opts: {
     `    data=${opts.data},${opts.dataComment ? `  # ${opts.dataComment}` : ""}`,
     `    anns_field="${opts.annsField}",`,
     ...(opts.filter ? [`    filter=${pyFilter(opts.filter)},`] : []),
+    ...(opts.ranker ? [`    ranker=${opts.ranker},`] : []),
+    ...pyGroup(opts.group ?? false),
+    ...pyHighlighter(opts.highlight ?? false),
+    ...pyOrderBy(opts.sort ?? "relevance", opts.mode ?? "search"),
     `    limit=${opts.limit},`,
     `    offset=${opts.offset},`,
     `    output_fields=${pyList(OUTPUT_FIELDS)},`,
@@ -147,6 +162,10 @@ function pyHybrid(opts: {
   ranker: string;
   limit: number;
   offset: number;
+  sort?: SortKey;
+  mode?: QueryMode;
+  group?: boolean;
+  highlight?: boolean;
 }): string {
   const reqLines = opts.reqs.map(
     (r) =>
@@ -159,6 +178,9 @@ function pyHybrid(opts: {
     ...reqLines,
     `    ],`,
     `    ranker=${opts.ranker},`,
+    ...pyGroup(opts.group ?? false),
+    ...pyHighlighter(opts.highlight ?? false),
+    ...pyOrderBy(opts.sort ?? "relevance", opts.mode ?? "search"),
     `    limit=${opts.limit},`,
     `    offset=${opts.offset},`,
     `    output_fields=${pyList(OUTPUT_FIELDS)},`,
@@ -180,6 +202,23 @@ async function zilliz(env: Env, path: string, body: unknown): Promise<any> {
     throw new Error(`Zilliz ${path}: ${json.message ?? JSON.stringify(json)}`);
   }
   return json;
+}
+
+// Vector index type (e.g. "IVF_RABITQ"), fetched once per isolate and memoized — it does
+// not change over the lifetime of the collection. Best-effort: on failure this just
+// leaves the diagnostics row blank rather than failing the search.
+let indexTypeMemo: string | undefined;
+async function vectorIndexType(env: Env): Promise<string | undefined> {
+  if (!CAPS.describeIndex) return undefined;
+  if (indexTypeMemo) return indexTypeMemo;
+  try {
+    const out = await zilliz(env, "indexes/describe", { collectionName: COLLECTION, indexName: "text_vec" });
+    const d = out.data?.[0];
+    indexTypeMemo = d?.[REST_NAMES.describeIndexTypeField] ?? d?.index_type ?? d?.params?.index_type;
+  } catch (e: any) {
+    console.error("describe index failed:", e?.message ?? e);
+  }
+  return indexTypeMemo;
 }
 
 async function embedQuery(env: Env, q: string): Promise<number[]> {
@@ -321,8 +360,21 @@ function toProduct(row: Record<string, any>): Product {
     categories: asStringArray(row.categories),
     image_url: row.image_url,
     text_snippet: row.text_snippet,
+    first_seen: typeof row.first_seen === "string" ? row.first_seen : undefined,
+    store_city: row.store_city,
     score: typeof row.distance === "number" ? row.distance : undefined,
   };
+}
+
+/**
+ * Documented no-op: probe 4 found no highlighter on this build, so a row never carries a
+ * highlight block and there is no fragment to return (and `Product` has no `highlight`
+ * field). Exported as the seam a highlighting build would fill in — parse
+ * `row.highlight?.text_snippet` / `row.entity?.highlight?.text_snippet` here and return
+ * the first fragment containing `HL_OPEN`.
+ */
+export function firstFragment(_row: Record<string, any>): string | undefined {
+  return undefined;
 }
 
 // Sort the retrieved candidate window. Relevance keeps native vector/scan order.
@@ -342,6 +394,14 @@ function applySort(results: Product[], sort: SortKey): Product[] {
       );
     case "reviews":
       return r.sort((a, b) => (b.rating_number ?? 0) - (a.rating_number ?? 0));
+    case "newest":
+      // first_seen is an RFC3339 string, so lexicographic compare is chronological.
+      // Rows without one sort last.
+      return r.sort((a, b) => {
+        const fa = a.first_seen ?? "";
+        const fb = b.first_seen ?? "";
+        return fa === fb ? 0 : fa > fb ? -1 : 1;
+      });
     case "relevance":
     default:
       return r;
@@ -362,6 +422,12 @@ function canonicalFilters(f: Filters = {}): Record<string, unknown> {
   if (isNum(f.minReviews)) out.minReviews = f.minReviews;
   if (f.brands?.length) out.brands = [...f.brands].sort();
   if (f.category) out.category = f.category;
+  if (f.phrase?.trim()) out.phrase = f.phrase.trim();
+  // Key on the day-rounded cutoff, not the raw day count: that is what the compiled filter
+  // actually carries, so two requests a minute apart still share one entry.
+  if (isNum(f.listedWithinDays) && f.listedWithinDays > 0 && f.listedWithinDays <= 3650)
+    out.listedCutoff = dateCutoffIso(f.listedWithinDays);
+  if (f.near?.city && isNum(f.near.km)) out.near = { city: f.near.city.trim().toLowerCase(), km: f.near.km };
   return out;
 }
 
@@ -381,6 +447,11 @@ function normalizeForKey(body: SearchRequest): Record<string, unknown> {
     offset: Math.max(0, Math.floor(body.offset ?? 0)),
     limit,
     understand: body.understand !== false,
+    fusion: body.fusion === "rrf" ? "rrf" : "weighted",
+    synonyms: body.synonyms !== false,
+    groupByBrand: body.groupByBrand === true,
+    boost: body.boost ?? null,
+    day: new Date().toISOString().slice(0, 10), // boost "newest" origin and date cutoffs roll daily
     filters: canonicalFilters(body.filters),
   };
 }
@@ -460,21 +531,41 @@ export async function onRequestPost(ctx: Ctx): Promise<Response> {
 // payload, or a 502 on any failure (caller decides whether to cache).
 async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
   try {
+    const now = new Date();
     const rawQ = (body.q ?? "").trim();
     const seedId = (body.similarTo ?? "").trim();
     const sort: SortKey = body.sort ?? "relevance";
+    // Which branch runs is decided by the request alone, and the sort strategy depends on
+    // it (`orderByFields` exists only on `entities/query`), so resolve it up front.
+    const mode: QueryMode = seedId ? "similar" : rawQ ? "search" : "browse";
     // Dense/semantic weight for hybrid search: 0 = pure BM25, 1 = pure dense. Clamp to [0,1].
     const alpha = Math.min(1, Math.max(0, typeof body.alpha === "number" ? body.alpha : DEFAULT_HYBRID_ALPHA));
+    // How the two sub-searches are fused when both run: weighted (α-tunable) or RRF.
+    const fusion: Fusion = body.fusion === "rrf" ? "rrf" : "weighted";
+    // Lexical field: the synonym-expanded analyzer by default ("tablet" also matches iPad),
+    // or the plain BM25 field when the UI switches synonyms off.
+    const synonyms = body.synonyms !== false;
+    const sparseField = synonyms ? "text_syn_sparse" : "text_sparse";
+    const groupByBrand = body.groupByBrand === true;
+    // `newest` would need a TIMESTAMPTZ decay input, which this build rejects (probe 7), so
+    // `decaySpec` returns null for it — treat it as no boost rather than a silent no-op.
+    const boost: Boost | null = (["cheaper", "rated", "popular"] as readonly string[]).includes(body.boost ?? "")
+      ? (body.boost as Boost)
+      : null;
 
     const offset = Math.max(0, Math.floor(body.offset ?? 0));
     let limit = Math.floor(body.limit ?? 24);
     limit = Math.min(Math.max(1, limit), MAX_LIMIT);
     if (offset + limit > MAX_WINDOW) limit = Math.max(1, MAX_WINDOW - offset);
 
-    // Scalar sorts can't be paginated at the DB: over-fetch a relevance-ranked pool at
-    // offset 0, sort it whole, then slice the page below. Relevance keeps native, unbounded
-    // offset/limit pagination. fetchLimit/fetchOffset drive every Zilliz branch.
-    const sorted = sort !== "relevance";
+    // One sort can be pushed down to Milvus: browse + price_asc, via `orderByFields`
+    // (probe 2 — query-only, ascending-only, whole-set). That one paginates natively.
+    const nativeOrderBy = nativeOrderByFields(sort, mode);
+    // Every other scalar sort still can't be paginated at the DB: over-fetch a
+    // relevance-ranked pool at offset 0, sort it whole, then slice the page below.
+    // Relevance keeps native, unbounded offset/limit pagination. fetchLimit/fetchOffset
+    // drive every Zilliz branch.
+    const sorted = sort !== "relevance" && !nativeOrderBy;
     const fetchLimit = sorted ? Math.min(POOL_SIZE, MAX_LIMIT) : limit;
     const fetchOffset = sorted ? 0 : offset;
 
@@ -482,14 +573,18 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
 
     // Strip filter phrases out of the query before embedding; surface the implied
     // filters back to the UI. Never let understanding failure break the search.
-    let cleanedQuery = rawQ;
+    // A "quoted phrase" becomes an exact-phrase filter — deterministically, before the LLM
+    // ever sees the text. The words stay in `unquoted` (they are still good query terms);
+    // only the quote marks go.
+    const { phrase, rest: unquoted } = extractPhrase(rawQ);
+    let cleanedQuery = unquoted;
     let llmFilters: Filters = {};
     let understood = false;
     let understandMs: number | undefined;
     if (rawQ !== "" && body.understand !== false) {
       const tu = Date.now();
       try {
-        const r = await understandQuery(env, rawQ);
+        const r = await understandQuery(env, unquoted);
         cleanedQuery = r.cleanedQuery;
         llmFilters = r.filters;
         understood = true;
@@ -502,26 +597,28 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
 
     // Deterministic backstop fills any explicit filter the LLM missed (or all of them
     // if the LLM call failed). The model still owns cleaned_query and fuzzy phrasing.
-    const impliedFilters = rawQ !== "" ? backstopFilters(rawQ, llmFilters) : {};
+    const impliedFilters: Filters = rawQ !== "" ? backstopFilters(unquoted, llmFilters) : {};
+    if (phrase) impliedFilters.phrase = phrase;
     const applied = understood || Object.keys(impliedFilters).length > 0;
 
     // UI filters combine with implied filters; the query's intent wins on conflict.
     const effectiveFilters: Filters = { ...(body.filters ?? {}), ...impliedFilters };
-    const filter = compileFilter(effectiveFilters);
+    const filter = compileFilter(effectiveFilters, now);
 
     let rows: Record<string, any>[];
-    let mode: "search" | "browse" | "similar";
     let embedMs: number | undefined;
     let embedDim: number | undefined;
     let seedMs: number | undefined;
     let annsField: string | undefined;
-    let strategy: "dense" | "sparse" | "weighted" | undefined;
+    let strategy: "dense" | "sparse" | "weighted" | "rrf" | undefined;
+    let groupBy: string | undefined;
+    let sparseFieldUsed: "text_sparse" | "text_syn_sparse" | undefined;
+    let ranker: string | undefined;
     let pymilvusQuery: string | undefined;
     let zStart: number;
 
     if (seedId) {
       // "More like this": seed similarity from a product's stored vectors — no embedding.
-      mode = "similar";
       const ts = Date.now();
       const seedOut = await zilliz(env, "entities/query", {
         collectionName: COLLECTION,
@@ -546,6 +643,7 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
       if (Array.isArray(imageVec) && imageVec.length) {
         // Blend semantic-text and visual similarity via reciprocal-rank fusion.
         annsField = "text_vec + image_vec (rrf)";
+        ranker = "RRFRanker(60)";
         pymilvusQuery = pyHybrid({
           reqs: [
             { data: "[seed_text_vec]", annsField: "text_vec", filter: subFilter, limit: subLimit },
@@ -554,6 +652,8 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
           ranker: "RRFRanker(60)",
           limit: fetchLimit,
           offset: fetchOffset,
+          sort,
+          mode,
         });
         const out = await zilliz(env, "entities/hybrid_search", {
           collectionName: COLLECTION,
@@ -561,7 +661,9 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
             { data: [textVec], annsField: "text_vec", filter: subFilter, limit: subLimit },
             { data: [imageVec], annsField: "image_vec", filter: subFilter, limit: subLimit },
           ],
-          rerank: { strategy: "rrf", params: { k: 60 } },
+          ...rrfRerank(),
+          // {} unless the sort can be pushed down, which on this build only browse can.
+          ...orderByParam(sort, mode),
           limit: fetchLimit,
           offset: fetchOffset,
           outputFields: OUTPUT_FIELDS,
@@ -576,12 +678,15 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
           filter: subFilter,
           limit: fetchLimit,
           offset: fetchOffset,
+          sort,
+          mode,
         });
         const out = await zilliz(env, "entities/search", {
           collectionName: COLLECTION,
           data: [textVec],
           annsField: "text_vec",
           filter: subFilter,
+          ...orderByParam(sort, mode),
           limit: fetchLimit,
           offset: fetchOffset,
           outputFields: OUTPUT_FIELDS,
@@ -589,33 +694,66 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
         rows = out.data ?? [];
       }
     } else if (rawQ) {
-      mode = "search";
-      // Tunable blend of dense (text_vec) + BM25 lexical (text_sparse). Dispatch on alpha:
-      // alpha>=1 pure dense, alpha<=0 pure BM25 (skips embedding), else weighted hybrid.
-      if (alpha <= 0) {
+      // Tunable blend of dense (text_vec) + BM25 lexical (the sparse field). Dispatch on
+      // fusion + alpha: weighted α>=1 pure dense, weighted α<=0 pure BM25 (skips the
+      // embedding), otherwise a hybrid fused by RRF or by the weighted reranker.
+      // Each sub-search must surface enough candidates to fill the requested window.
+      const subLimit = Math.min(fetchOffset + fetchLimit, MAX_LIMIT);
+      const hybrid = fusion === "rrf" || (alpha > 0 && alpha < 1);
+      // A decay boost is sent as a FunctionScore, and on hybrid search that REPLACES the
+      // fusion reranker — only one reranker per request (probe 7). So the boost applies on
+      // the single-field paths only; hybrid keeps its fusion and the UI greys the boost out.
+      const boostActive = !!boost && (!hybrid || CAPS.decayStacksWithFusion);
+      // No highlighter exists on this build (probe 4) — both CAPS are false, so this is
+      // always false. Kept as the gate a highlighting build would flip.
+      const highlight =
+        alpha < 1 || fusion === "rrf" ? (hybrid ? CAPS.highlightHybrid : CAPS.highlightSparse) : false;
+      // groupingField works on both entities/search and entities/hybrid_search (probe 6).
+      const group = groupByBrand;
+      const common = {
+        // Never `orderByParam` here: `orderByFields` is silently dropped by search and
+        // hybrid_search (probe 2), so the pool sort below owns every non-browse sort.
+        ...groupParam(group),
+        ...highlighterParam(highlight),
+        limit: fetchLimit,
+        offset: fetchOffset,
+        outputFields: OUTPUT_FIELDS,
+      };
+      // One gate for both the wire request and the transcript, so they cannot disagree.
+      const rankerText = pyRanker({ fusion, alpha, boost: boostActive ? boost : null, hybrid }, now);
+      // Read the diagnostics back off the builders, so `groupBy` can only claim a grouping
+      // the request actually carries. `sparseField` is set per branch — the pure-dense path
+      // never touches a sparse field, so it must not advertise one.
+      groupBy = Object.keys(groupParam(group)).length ? "store" : undefined;
+      ranker = rankerText ?? undefined;
+
+      if (fusion === "weighted" && alpha <= 0) {
         // Pure BM25: Milvus applies the analyzer + BM25 function to the raw query text.
         // No embedding call (latency/cost win) — embedMs/embedDim stay undefined.
         strategy = "sparse";
-        annsField = "text_sparse";
+        annsField = sparseField;
+        sparseFieldUsed = sparseField;
         pymilvusQuery = pySearch({
           data: `[${pyStr(cleanedQuery)}]`,
-          annsField: "text_sparse",
+          annsField: sparseField,
           filter,
           limit: fetchLimit,
           offset: fetchOffset,
+          group,
+          highlight,
+          ranker: rankerText,
         });
         zStart = Date.now();
         const out = await zilliz(env, "entities/search", {
           collectionName: COLLECTION,
           data: [cleanedQuery],
-          annsField: "text_sparse",
+          annsField: sparseField,
           ...(filter ? { filter } : {}),
-          limit: fetchLimit,
-          offset: fetchOffset,
-          outputFields: OUTPUT_FIELDS,
+          ...(boostActive ? decayParam(boost, now) : {}),
+          ...common,
         });
         rows = out.data ?? [];
-      } else if (alpha >= 1) {
+      } else if (fusion === "weighted" && alpha >= 1) {
         // Pure dense vector search.
         strategy = "dense";
         annsField = ANNS_FIELD;
@@ -630,6 +768,9 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
           filter,
           limit: fetchLimit,
           offset: fetchOffset,
+          group,
+          highlight: false,
+          ranker: rankerText,
         });
         zStart = Date.now();
         const out = await zilliz(env, "entities/search", {
@@ -637,53 +778,55 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
           data: [vector],
           annsField: ANNS_FIELD,
           ...(filter ? { filter } : {}),
-          limit: fetchLimit,
-          offset: fetchOffset,
-          outputFields: OUTPUT_FIELDS,
+          ...(boostActive ? decayParam(boost, now) : {}),
+          ...common,
         });
         rows = out.data ?? [];
       } else {
-        // Weighted hybrid: dense + BM25 sub-searches fused by a weighted reranker. The
+        // Hybrid: dense + BM25 sub-searches fused by RRF or by the weighted reranker. The
         // dense sub-search MUST be first so weights[0]=alpha applies to it (positional).
         // norm_score min-max normalizes each sub-search to [0,1] so weights are linear.
-        strategy = "weighted";
-        annsField = `text_vec + text_sparse (weighted α=${alpha})`;
+        strategy = fusion === "rrf" ? "rrf" : "weighted";
+        annsField = `text_vec + ${sparseField} (${strategy}${strategy === "weighted" ? ` α=${alpha}` : ""})`;
+        sparseFieldUsed = sparseField;
         const te = Date.now();
         const vector = await embedQuery(env, cleanedQuery);
         embedMs = Date.now() - te;
         embedDim = vector.length;
-        // Each sub-search must surface enough candidates to fill the requested window.
-        const subLimit = Math.min(fetchOffset + fetchLimit, MAX_LIMIT);
         pymilvusQuery = pyHybrid({
           reqs: [
             { data: "[query_vector]", annsField: "text_vec", filter, limit: subLimit },
-            { data: `[${pyStr(cleanedQuery)}]`, annsField: "text_sparse", filter, limit: subLimit },
+            { data: `[${pyStr(cleanedQuery)}]`, annsField: sparseField, filter, limit: subLimit },
           ],
-          ranker: `WeightedRanker(${pyNum(alpha)}, ${pyNum(1 - alpha)}, norm_score=True)`,
+          ranker: rankerText ?? "RRFRanker(60)",
           limit: fetchLimit,
           offset: fetchOffset,
+          group,
+          highlight,
         });
         zStart = Date.now();
         const out = await zilliz(env, "entities/hybrid_search", {
           collectionName: COLLECTION,
           search: [
             { data: [vector], annsField: "text_vec", ...(filter ? { filter } : {}), limit: subLimit },
-            { data: [cleanedQuery], annsField: "text_sparse", ...(filter ? { filter } : {}), limit: subLimit },
+            { data: [cleanedQuery], annsField: sparseField, ...(filter ? { filter } : {}), limit: subLimit },
           ],
-          rerank: { strategy: "weighted", params: { weights: [alpha, 1 - alpha], norm_score: true } },
-          limit: fetchLimit,
-          offset: fetchOffset,
-          outputFields: OUTPUT_FIELDS,
+          // The fusion reranker owns `rerank` here — a decay FunctionScore would replace it
+          // (probe 7), which is why `boostActive` is false on this path.
+          ...(fusion === "rrf" ? rrfRerank() : weightedRerank(alpha)),
+          ...common,
         });
         rows = out.data ?? [];
       }
     } else {
-      mode = "browse";
-      pymilvusQuery = pyQuery(filter, fetchLimit, fetchOffset);
+      pymilvusQuery = pyQuery(filter, fetchLimit, fetchOffset, sort);
       zStart = Date.now();
       const out = await zilliz(env, "entities/query", {
         collectionName: COLLECTION,
         filter, // "" is accepted = browse all
+        // The one push-down this build supports: sorts the whole filtered set, so
+        // fetchLimit/fetchOffset are the real page window (no pool over-fetch).
+        ...orderByParam(sort, mode),
         limit: fetchLimit,
         offset: fetchOffset,
         outputFields: OUTPUT_FIELDS,
@@ -703,7 +846,7 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
       results = ranked.slice(offset, offset + limit);
       total = ranked.length; // candidate-pool count (capped at POOL_SIZE)
     } else {
-      results = pool; // native relevance page, already windowed at the DB
+      results = pool; // native DB-ordered page (relevance, or the browse price-ascending order_by)
     }
     const payload: SearchResponse = {
       results,
@@ -721,8 +864,14 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
         limit,
         offset,
         pool: sorted ? fetchLimit : undefined,
+        orderBy: nativeOrderBy ? orderByFor(sort) : undefined,
+        orderBySemantics: nativeOrderBy ? CAPS.orderBySemantics : undefined,
         alpha: mode === "search" ? alpha : undefined,
         strategy,
+        groupBy,
+        ranker,
+        sparseField: mode === "search" ? sparseFieldUsed : undefined,
+        indexType: await vectorIndexType(env),
         pymilvusQuery,
         count: results.length,
         timings: { understandMs, embedMs, seedMs, zillizMs, serverMs: Date.now() - t0 },
