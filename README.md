@@ -258,8 +258,10 @@ npm run deploy:prod   # build + deploy to production (vdb-ecom.pages.dev)
 `npm run deploy:prod` (`wrangler pages deploy dist --branch main`) publishes to the production
 URL `vdb-ecom.pages.dev`.
 
-> Secrets are scoped per environment. `wrangler pages secret put NAME` targets **production**;
-> add `--environment preview` to set them for preview deployments. Secret changes only take
+> Secrets are scoped per environment. `wrangler pages secret put NAME` targets **production**
+> (wrangler 4.101 has no preview flag); preview secrets are set through the Pages API
+> (`PATCH /accounts/<id>/pages/projects/vdb-ecom` with `deployment_configs.preview.env_vars`,
+> see CLAUDE.md). Secret changes only take
 > effect on the **next** deployment, so set secrets first, then deploy.
 
 The Workers AI `[ai]` binding is declared in `wrangler.toml` and applies automatically. The

@@ -37,20 +37,28 @@ sees the DB key and never calls Zilliz directly.
   `.dev.vars.example`.
 - Prod: the Pages project must exist first (`wrangler pages project create vdb-ecom
   --production-branch main`), then `wrangler pages secret put ZILLIZ_ENDPOINT` / `... TOKEN`.
-- Secrets are **per-environment**: `secret put` targets production; add `--environment preview`
-  for preview deploys. Changes apply only to the *next* deploy. Preview URL is
+- Secrets are **per-environment**: `secret put` targets production only on wrangler 4.101; preview
+  secrets go through the Pages API (see "Preview secrets" below). Changes apply only to the *next* deploy. Preview URL is
   `<branch>.vdb-ecom.pages.dev`; production is `vdb-ecom.pages.dev`.
 - Workers AI: `[ai]` binding `AI` in `wrangler.toml`. The binding proxies to real Workers
   AI **even in local dev** (incurs charges).
 - **This branch** (`milvus-3.0`): `ZILLIZ_ENDPOINT`/`ZILLIZ_TOKEN` must point at the dedicated
   Milvus 3.0-compatible cluster hosting `amazon_reviews_v3` — not the 2.x serverless cluster
   described elsewhere in this file. It deploys to the **preview** environment of the existing
-  `vdb-ecom` Pages project (`wrangler pages secret put ZILLIZ_ENDPOINT`/`ZILLIZ_TOKEN
-  --environment preview`), landing at `milvus-3-0.vdb-ecom.pages.dev`. Preview-environment
+  `vdb-ecom` Pages project (preview secrets set via the Pages API, see below), landing at `milvus-3-0.vdb-ecom.pages.dev`. Preview-environment
   secrets are shared across *all* preview branches, so other preview deploys will also hit the
   3.0 cluster while these are set. The loader uses a separate `ZILLIZ_WRITE_TOKEN` (data-admin
   key, `.dev.vars` only, never a Pages secret) — the app's own `ZILLIZ_TOKEN` stays read-only
   (Search/Query/Describe).
+
+- **Preview secrets on wrangler 4.101:** `wrangler pages secret put` has no `--environment`
+  flag (it only writes production), so preview-environment secrets are set with the Pages API
+  that wrangler itself uses: `PATCH https://api.cloudflare.com/client/v4/accounts/<account>/pages/projects/vdb-ecom`
+  with `{"deployment_configs":{"preview":{"env_vars":{"ZILLIZ_ENDPOINT":{"type":"secret_text","value":…},"ZILLIZ_TOKEN":{…}}}}}`
+  and the OAuth token from `~/Library/Preferences/.wrangler/config/default.toml` (done
+  2026-09-04). Secrets apply to the *next* deploy. The Pages project lives in the **Loxima**
+  account (`88729be0c36b22faf8073deca088968c`); with several accounts on the login, export
+  `CLOUDFLARE_ACCOUNT_ID` before `npm run dev`/`npm run deploy` or wrangler refuses to pick one.
 
 ## Collection — `amazon_reviews_v3` (dedicated Milvus 3.0 cluster, AWS eu-west-1)
 On this branch the app runs against a **dedicated** Milvus 3.0-compatible Zilliz Cloud cluster
