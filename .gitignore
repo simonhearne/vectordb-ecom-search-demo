@@ -31,3 +31,6 @@ dist/
 
 # superpowers SDD scratch
 .superpowers/
+
+# python bytecode
+__pycache__/
