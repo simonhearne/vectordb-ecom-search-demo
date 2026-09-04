@@ -175,13 +175,16 @@ wish list.
 | **One per brand** toggle | `groupingField:"store", groupSize:1` | Grouped search |
 | **Boost**: cheaper / better rated / popular | `functionScore` decay reranker (`type:"Rerank"`, gauss/exp) — enabled only at the slider extremes | Decay rerank |
 | Live "N in catalogue matching your search" + price bounds | `entities/query` scalar aggregation (`count(*)`, `min`/`max(price)`) | Aggregations |
+| Counts beside every brand and category | `entities/query` for `store`/`categories` of the matching rows (PK-paged, ≤2×16,384), tallied in the proxy — no GROUP BY over REST | Aggregations |
 | Sort → *Price: low to high* (browse only) | native `orderByFields` on `entities/query` | `order_by_fields` |
 | Diagnostics → Vector index | `indexes/describe` → `indexType` (`IVF_RABITQ`) | RaBitQ |
 | Empty-state "Try:" chips | dense retrieval + synonym analyzer absorbing a misspelling — no fuzziness claim | Typo gap |
 
 **Not on this cluster's REST v2** (so not in the app): result highlighting — cards show the
-plain snippet, never a marked-up one; live per-brand/category facet counts (GROUP BY isn't
-exposed on `entities/query`, so `public/facets.json` still supplies those lists); a
+plain snippet, never a marked-up one; native GROUP BY aggregation (not exposed on
+`entities/query` — per-brand/category counts are computed in the proxy instead: it fetches the
+matching rows' `store`/`categories` columns PK-ordered in up to two 16,384-row pages and tallies
+them, exact up to 32,768 rows, labelled approximate beyond); a
 token-preview (`run_analyzer` 404s over REST); decay boosting on `first_seen`; and any sort
 other than *browse + Price: low to high* pushed server-side — every other sort keeps this
 app's original over-fetch-and-sort (`POOL_SIZE`) approach.

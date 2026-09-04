@@ -15,8 +15,8 @@ sees the DB key and never calls Zilliz directly.
   let Vite proxy to it; see `vite.config.ts`.)
 - `npm run dev:vite` — UI only on :5173 (no backend, so `/api` calls fail).
 - `npm run build` — `vite build` → `dist/`.
-- `npm run build:facets` — regenerate `public/facets.json` from the live collection (still the
-  source for brand/category lists — live GROUP BY isn't available on this branch's cluster).
+- `npm run build:facets` — regenerate `public/facets.json` (the brand/category lists shown
+  before the first `/api/facets` response; live counts replace them once a query/filter runs).
 - `npm run load:v3` — `.venv/bin/python scripts/load_v3.py`: (re)builds `amazon_reviews_v3` on
   the dedicated Milvus 3.0 cluster from the lab parquet. `--drop` recreates; `--schema-only`
   prints the schema without touching data; `--limit N` for a small validation run; `--reanchor`
@@ -121,12 +121,17 @@ the diff focused).
   "Change here, nowhere else" — `search.ts`/`facets.ts` gate every 3.0-only request fragment
   through this file, so the diagnostics transcript can never claim a parameter the request
   didn't actually carry.
-- `functions/api/facets.ts` — proxy: `POST /api/facets`, live scalar aggregation
-  (`entities/query` + `count(*)`/`min`/`max` in `outputFields` — two calls run in parallel,
-  since the two can't be combined in one) scoped to the current filters (+ `TEXT_MATCH` once a
-  query is committed). Returns `{ total, priceMin, priceMax }`. GROUP BY isn't available on
-  this cluster, so there are no live per-brand/category counts — `public/facets.json` +
-  `npm run build:facets` still supply those lists.
+- `functions/api/facets.ts` — proxy: `POST /api/facets`, scoped to the current filters (+
+  `TEXT_MATCH` once a query is committed). `count(*)` and `min/max(price)` are scalar
+  aggregations (two `entities/query` calls — they can't share one). **Per-brand / per-category
+  counts** are computed in the proxy: GROUP BY doesn't exist over REST v2 here, so it fetches
+  the matching rows' `store` + `categories` (PK-ordered, `limit 16384`, paged by
+  `parent_asin > last`, max 2 pages) and counts them with `src/lib/facetCounts.ts`. Standard
+  faceting: brand counts ignore the brand filter, category counts ignore the category filter
+  (one fetch when neither is set, two in parallel otherwise). Returns `{ total, priceMin,
+  priceMax, brands, categories, exact, sampled }`; `exact: false` means the set exceeded
+  32,768 rows and counts come from the first `sampled` rows (bare browse). `public/facets.json`
+  is only the pre-response fallback list.
 - `src/lib/filter.ts` — `compileFilter()` (shared by `search.ts` and `facets.ts`,
   unit-tested): price/rating/reviews/brand/category, plus `PHRASE_MATCH`, the `first_seen`
   date cutoff (`dateCutoffIso`, floored to UTC midnight so the cache key stays stable within a
@@ -254,12 +259,14 @@ hopes":
   boost and a blended α (or RRF) are mutually exclusive; `boostDisabledReason` in `App.tsx`
   mirrors this rule client-side. There is no "boost newest": decay rejects `first_seen`
   (TIMESTAMPTZ isn't a numeric decay input).
-- **Live catalogue count + price bounds** (`/api/facets`) — two `entities/query` scalar
-  aggregation calls (`count(*)`; `min(price)`/`max(price)` — the two can't be combined in one
-  call), scoped to the current filters plus `TEXT_MATCH(text_snippet, q)` once a query is
-  committed. Rail shows "N in catalogue matching your search" and live price-slider bounds.
-  **No live per-brand/category counts** — GROUP BY isn't exposed by REST v2 on this cluster, so
-  `public/facets.json` + `npm run build:facets` still supply those lists.
+- **Live catalogue count, price bounds and per-brand/category counts** (`/api/facets`) —
+  `count(*)` and `min(price)`/`max(price)` are scalar aggregation calls (they can't be combined
+  in one); brand/category counts are **fetch-and-count in the proxy** (GROUP BY isn't exposed
+  by REST v2 on this cluster): the matching rows' `store`/`categories` columns are pulled
+  PK-ordered in up to two 16,384-row pages and tallied. Scoped to the current filters plus
+  `TEXT_MATCH(text_snippet, q)` once a query is committed. Rail shows "N in catalogue matching
+  your search", live price-slider bounds, a count beside every brand, and counts in the
+  category dropdown; sets past 32,768 rows are labelled "counts approximate".
 - **Sort** — native `orderByFields` exists only on `entities/query` (browse), ascending only,
   over the whole filtered set — used for browse and **Price: low to high** only. Every other
   sort (price: high to low, rating, reviews, newest, and every sort in search/similar mode)
@@ -270,7 +277,8 @@ hopes":
 **Not available over REST v2 on this cluster** (so not in the app): result highlighting (no
 highlighter field on `entities/search`/`hybrid_search` — cards show the plain `text_snippet`;
 `HL_OPEN`/`HL_CLOSE` sentinels are defined in `rest.ts` as a documented no-op for if a future
-build gains one), GROUP BY aggregation (no per-brand/category counts), `run_analyzer` (no token
+build gains one), GROUP BY aggregation (per-brand/category counts are computed in the proxy
+instead), `run_analyzer` (no token
 preview in diagnostics), decay reranking on TIMESTAMPTZ, and descending or search-side
 `order_by`.
 

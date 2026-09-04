@@ -114,10 +114,23 @@ export interface FacetsRequest {
   filters?: Filters;
 }
 
+export interface FacetBucket {
+  value: string;
+  count: number;
+}
+
 export interface FacetsResponse {
   total: number; // count(*) under the current filter (+ TEXT_MATCH when a query is committed)
   priceMin: number;
   priceMax: number;
+  // Per-value counts, computed in the proxy from the matching rows' `store` / `categories`
+  // (no GROUP BY over REST on this cluster). Standard faceting: brand counts ignore the
+  // brand filter, category counts ignore the category filter, so alternatives stay visible.
+  brands: FacetBucket[];
+  categories: FacetBucket[];
+  // false when a set exceeded the row cap and counts come from the first `sampled` rows.
+  exact: boolean;
+  sampled: number;
   debug: { filter: string; pymilvusQuery: string; zillizMs: number };
 }
 

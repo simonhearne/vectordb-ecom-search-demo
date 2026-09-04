@@ -46,11 +46,33 @@ export function FilterPanel({
     onChange({ brands: [...set] });
   };
 
+  // Live per-value counts replace the static lists whenever the proxy has answered; the
+  // static lists (no counts) are the fallback before the first response. A value that is
+  // currently selected always stays listed so it can be unselected, even at zero matches.
+  type Row = { value: string; count: number | null };
+  const withSelected = (rows: Row[], selected: string[]): Row[] => {
+    const seen = new Set(rows.map((r) => r.value));
+    return [...rows, ...selected.filter((v) => !seen.has(v)).map((v) => ({ value: v, count: live ? 0 : null }))];
+  };
+  const brandRows: Row[] = withSelected(
+    live ? live.brands : facets.brands.map((value) => ({ value, count: null })),
+    filters.brands ?? [],
+  );
+  const categoryRows: Row[] = withSelected(
+    live ? live.categories : facets.categories.map((value) => ({ value, count: null })),
+    filters.category ? [filters.category] : [],
+  );
+
   return (
     <div className="text-sm">
       {live && (
         <p className="mb-3 text-xs text-faint">
           {countFmt.format(live.total)} in catalogue matching your search
+          {!live.exact && (
+            <span title={`Brand and category counts come from the first ${countFmt.format(live.sampled)} matching products`}>
+              {" "}· counts approximate
+            </span>
+          )}
         </p>
       )}
 
@@ -122,7 +144,8 @@ export function FilterPanel({
 
       <Section title="Brand">
         <div className="-mr-1 max-h-56 space-y-0.5 overflow-y-auto pr-1">
-          {facets.brands.map((brand) => {
+          {brandRows.length === 0 && <p className="px-2 py-1.5 text-xs text-faint">No brands match</p>}
+          {brandRows.map(({ value: brand, count }) => {
             const checked = filters.brands?.includes(brand) ?? false;
             return (
               <label
@@ -135,9 +158,12 @@ export function FilterPanel({
                   onChange={() => toggleBrand(brand)}
                   className="h-4 w-4 shrink-0 accent-[var(--color-accent)]"
                 />
-                <span className={`truncate ${checked ? "font-semibold text-ink" : "text-muted"}`}>
+                <span className={`flex-1 truncate ${checked ? "font-semibold text-ink" : "text-muted"}`}>
                   {brand}
                 </span>
+                {count != null && (
+                  <span className="text-xs tabular-nums text-faint">{countFmt.format(count)}</span>
+                )}
               </label>
             );
           })}
@@ -152,9 +178,9 @@ export function FilterPanel({
             className="w-full appearance-none rounded-lg border border-line bg-surface py-2 pl-2.5 pr-8 text-ink focus:border-accent focus:outline-none"
           >
             <option value="">All categories</option>
-            {facets.categories.map((c) => (
-              <option key={c} value={c}>
-                {c}
+            {categoryRows.map(({ value, count }) => (
+              <option key={value} value={value}>
+                {count != null ? `${value} (${countFmt.format(count)})` : value}
               </option>
             ))}
           </select>
