@@ -1,6 +1,11 @@
 // Single source of truth for Milvus 3.0 REST v2 parameter names and instance capabilities,
-// as verified by `npm run probe:v3` on 2026-09-03 against the `amazon_reviews_v3` collection.
+// as verified by `npm run probe:v3` on 2026-09-15 against the `amazon_reviews_v3` collection.
 // Change here, nowhere else.
+//
+// The cluster was upgraded to a v3.0.1-class build between the first probe (2026-09-03) and
+// this one, which turned three earlier `false`s true: query-path GROUP BY, search-side
+// `orderByFields`, and descending order_by. See milvus-io/milvus#52071 (master) / #52118
+// (cherry-pick to 3.0, merged 2026-08-03), released in v3.0.1 on 2026-09-09.
 //
 // Method note: the REST v2 decoder is strict about types on fields it knows and *silently
 // drops* fields it does not. Every name below was confirmed by an observable effect, and
@@ -11,17 +16,26 @@ import type { Boost, Fusion, SortKey } from "../../src/lib/types";
 
 export const REST_NAMES = {
   /**
-   * probe 2 — `entities/query` only. Value is a plain `string[]` of field names
-   * (`["price"]`), NOT `[{field, order}]`. Ascending only; no direction field exists.
-   * Sorts the whole filtered set, not the returned window.
+   * probe 2 — on `entities/query` AND `entities/search` (not hybrid_search, where the
+   * field is absent from the request struct and silently dropped). Value is a plain
+   * `string[]`, each item `"field"` or `"field:asc"` / `"field:desc"` — NOT
+   * `[{field, order}]`. On query it sorts the whole filtered set; on search only the
+   * returned window (see CAPS.orderBy*Semantics).
    */
   orderBy: "orderByFields",
   /**
-   * probe 3 — GROUP BY is not exposed by REST v2 on this build: every candidate name
-   * (groupByFields / group_by_fields / groupBy / group_by / groupByField / group_by_field)
-   * is silently dropped, and `outputFields` rejects a plain column alongside `count(*)`.
+   * probe 3 — `entities/query` only, a plain `string[]` of scalar field names, used
+   * together with aggregate expressions (`count(*)`, `min(price)`, …) in `outputFields`.
+   * The response is one row per bucket carrying the key columns and the aggregates.
    */
-  groupByFields: null as string | null,
+  groupByFields: "groupByFields" as string | null,
+  /**
+   * probe 3b — the search-side bucket aggregation on `entities/search`. Named here for
+   * completeness only: its bucket `count` tracks `topHits.size` rather than the whole
+   * match set (CAPS.searchAggregationFacetCounts), so it is a top-groups retrieval, not a
+   * facet counter, and `/api/facets` uses the query-path GROUP BY above instead.
+   */
+  searchAggregation: "searchAggregation",
   /** probe 4 — no highlighter field exists on the search request at all (see CAPS). */
   highlighterStyle: "camel" as "camel" | "snake",
   /**
@@ -49,16 +63,37 @@ export const REST_NAMES = {
 };
 
 export const CAPS = {
-  orderBySearch: false,       // probe 2: orderByFields is silently dropped by entities/search
-  orderByHybrid: false,       // probe 2: ... and by entities/hybrid_search
+  orderBySearch: true,        // probe 2: orderByFields sorts entities/search (v3.0.1)
+  orderByHybrid: false,       // probe 2: absent from the hybrid_search struct — silently dropped
   orderByQuery: true,         // probe 2: works on entities/query (browse)
-  orderBySemantics: "whole-set" as "window" | "whole-set", // probe 2 INFO line (on query)
-  orderByDescending: false,   // probe 2: ascending only — no direction field in the struct
-  orderByTimestamptz: false,  // probe 8: "first_seen has type Timestamptz which is not sortable"
+  orderByQuerySemantics: "whole-set" as "window" | "whole-set",  // probe 2 INFO (query)
+  orderBySearchSemantics: "window" as "window" | "whole-set",    // probe 2 INFO (search)
+  orderByDescending: true,    // probe 2: "field:desc" in the field string, on query and search
+  orderByTimestamptz: false,  // probe 8: "order_by field 'first_seen' has unsortable type Timestamptz"
+  orderByWithFunctionScore: false, // probe 2: "order_by and function rerank cannot be used together"
   aggregation: true,          // probe 3: count(*) / min() / max() / avg() / sum() in outputFields
-  aggregationGroupBy: false,  // probe 3: no group-by parameter exists
-  aggregationOrderByCount: false, // probe 3: needs group-by, so unreachable
-  aggregationCountWithOthers: false, // probe 3: count(*) may not be combined with min/max/avg/sum
+  aggregationGroupBy: true,   // probe 3: groupByFields on entities/query (v3.0.1)
+  aggregationGroupByArray: false, // probe 3: "group by field categories has unsupported data type Array"
+  aggregationOrderByCount: false, // probe 3: "ORDER BY on aggregate expression 'count(*)' is not yet supported"
+  /**
+   * probe 3 — **load-bearing.** A grouped query whose ORDER BY covers only a *prefix* of
+   * the group key returns aggregates that are silently PARTIAL once the limit truncates
+   * the bucket list: the per-shard cut happens before the proxy merges contributions, so
+   * a bucket can be missing another node's rows. Reproduced live — GROUP BY
+   * (main_category, store) ORDER BY main_category over "All Electronics" gives the head
+   * bucket 7 at limit 5, 10 at limit 50, and the true 13 only when nothing is truncated.
+   * An ORDER BY over the FULL group key is exact at every limit, which is why
+   * `facetGroupByParam` takes one field and pairs it with its own order_by.
+   * Upstream: milvus-io/milvus#52067 item 2.
+   */
+  aggregationPrefixOrderExact: false,
+  aggregationCountWithOthers: false, // probe 3: global count(*) may not be combined with min/max/avg/sum
+  aggregationGroupedCountWithOthers: true, // probe 3: ...but a GROUPED count(*) may
+  aggregationBucketWindow: 16384, // probe 3: limit+offset cap; page by `key > last` beyond it
+  searchAggregation: true,    // probe 3b: searchAggregation buckets on entities/search
+  searchAggregationFacetCounts: false, // probe 3b: bucket count tracks topHits.size, not the match set
+  searchAggregationHybrid: false, // probe 3b: "searchAggregation is not supported for hybrid search"
+  searchAggregationArray: false, // probe 3b: "unsupported data type ARRAY for group by operator"
   highlightSparse: false,     // probe 4: no highlighter field on entities/search
   highlightHybrid: false,     // probe 4: ... nor on entities/hybrid_search
   phraseMatch: true,          // probe 5: PHRASE_MATCH() in filter on dense, sparse and hybrid
@@ -111,17 +146,31 @@ export function orderByFor(sort: SortKey): OrderBy[] | undefined {
   }
 }
 
+/** One `orderByFields` item: `"price"` for the default ascending, else `"price:desc"`. */
+const obItem = (o: OrderBy) => (o.order === "asc" ? o.field : `${o.field}:${o.order}`);
+
 /**
- * The sorts this build can push down to Milvus, as the plain `string[]` of field names
- * `orderByFields` actually takes. Per probe 2 the parameter exists only on
- * `entities/query` (browse), is ascending only, and rejects TIMESTAMPTZ — which leaves
- * exactly `price_asc` in browse mode; `undefined` means the proxy must sort it itself.
- * (`price` carries no `-1` sentinels in `amazon_reviews_v3`, so ascending order needs no
- * unknown-price fix-up.)
+ * The sorts this build can push down to Milvus, as the `string[]` of `"field[:dir]"` items
+ * `orderByFields` actually takes. `undefined` means the proxy must sort the pool itself.
+ *
+ * Three gates, all from probe 2:
+ *  - the endpoint must implement the parameter at all (hybrid_search does not, so "similar"
+ *    never pushes down);
+ *  - it must sort the *whole filtered set*, not just the returned window. On
+ *    `entities/search` it is a window sort: it reorders the `offset+limit` rows the request
+ *    already asked for, so page 2 would sort a different window and pagination would be
+ *    incoherent. That rules search mode out even though the parameter works there — and it
+ *    is also refused alongside a boost's `functionScore` (CAPS.orderByWithFunctionScore).
+ *  - the fields must be expressible: descending now is, TIMESTAMPTZ `first_seen` is not.
+ *
+ * What survives is every browse sort except "newest". (`price` carries no `-1` sentinels in
+ * `amazon_reviews_v3`, so ascending order needs no unknown-price fix-up.)
  */
 export function nativeOrderByFields(sort: SortKey, mode: QueryMode): string[] | undefined {
   const supported = mode === "browse" ? CAPS.orderByQuery : mode === "similar" ? CAPS.orderByHybrid : CAPS.orderBySearch;
   if (!supported) return undefined;
+  const semantics = mode === "browse" ? CAPS.orderByQuerySemantics : CAPS.orderBySearchSemantics;
+  if (semantics !== "whole-set") return undefined;
   const ob = orderByFor(sort);
   if (!ob) return undefined;
   const pushable = ob.every(
@@ -129,8 +178,28 @@ export function nativeOrderByFields(sort: SortKey, mode: QueryMode): string[] | 
       (o.order === "asc" || CAPS.orderByDescending) &&
       (o.field !== "first_seen" || CAPS.orderByTimestamptz),
   );
-  return pushable ? ob.map((o) => o.field) : undefined;
+  return pushable ? ob.map(obItem) : undefined;
 }
+
+/**
+ * `orderByFields` for the facet queries, which are plain `entities/query` calls and so get
+ * the whole-set sort unconditionally. Used to page bucket keys by `key > last`.
+ */
+export const facetOrderByParam = (field: string): Record<string, unknown> =>
+  CAPS.orderByQuery ? { [REST_NAMES.orderBy]: [field] } : {};
+
+/**
+ * GROUP BY for the facet queries; `{}` when the build has no group-by parameter.
+ *
+ * Deliberately **one field, not a list**. Per CAPS.aggregationPrefixOrderExact, a group key
+ * wider than the ORDER BY silently returns partial counts as soon as the limit truncates the
+ * bucket list — and the facet queries always truncate at `store`. Taking a single field, and
+ * pairing it with `facetOrderByParam(field)` on the same field, makes that shape
+ * unexpressible rather than merely discouraged. Widen this only alongside a fix upstream
+ * (milvus-io/milvus#52067) or an ORDER BY that covers every group field.
+ */
+export const facetGroupByParam = (field: string): Record<string, unknown> =>
+  CAPS.aggregationGroupBy && REST_NAMES.groupByFields ? { [REST_NAMES.groupByFields]: [field] } : {};
 
 export const orderByParam = (sort: SortKey, mode: QueryMode): Record<string, unknown> => {
   const fields = nativeOrderByFields(sort, mode);

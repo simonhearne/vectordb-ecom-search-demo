@@ -1,5 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { countFacets, rowCategories } from "./facetCounts";
+import { countFacets, rowCategories, topBuckets } from "./facetCounts";
+
+describe("topBuckets", () => {
+  // The brand half of /api/facets ranks server-returned GROUP BY buckets here, because
+  // ORDER BY count(*) is not supported: the server can only order by the bucket key.
+  it("ranks by count, breaking ties by value, and keeps the top n", () => {
+    expect(
+      topBuckets([{ value: "Koss", count: 3 }, { value: "Sony", count: 9 }, { value: "Bose", count: 3 }], 2),
+    ).toEqual([{ value: "Sony", count: 9 }, { value: "Bose", count: 3 }]);
+  });
+  it("drops the empty-key bucket — a real row in the data, but not a brand to filter by", () => {
+    expect(topBuckets([{ value: "", count: 83 }, { value: "Sony", count: 2 }], 10)).toEqual([
+      { value: "Sony", count: 2 },
+    ]);
+  });
+  it("drops zero-count buckets", () => {
+    expect(topBuckets([{ value: "Sony", count: 0 }], 10)).toEqual([]);
+  });
+});
 
 describe("rowCategories", () => {
   it("accepts a plain string array", () => {

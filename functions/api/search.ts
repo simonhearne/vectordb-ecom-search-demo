@@ -558,8 +558,11 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
     limit = Math.min(Math.max(1, limit), MAX_LIMIT);
     if (offset + limit > MAX_WINDOW) limit = Math.max(1, MAX_WINDOW - offset);
 
-    // One sort can be pushed down to Milvus: browse + price_asc, via `orderByFields`
-    // (probe 2 — query-only, ascending-only, whole-set). That one paginates natively.
+    // Browse sorts push down to Milvus via `orderByFields` (probe 2 — a whole-set sort on
+    // `entities/query`, now both directions), so they paginate natively. Everything else
+    // falls through to the pool sort: search's own order_by only reorders the window it
+    // was given, and hybrid_search drops the parameter entirely. `newest` never pushes
+    // down anywhere — TIMESTAMPTZ is unsortable. See nativeOrderByFields.
     const nativeOrderBy = nativeOrderByFields(sort, mode);
     // Every other scalar sort still can't be paginated at the DB: over-fetch a
     // relevance-ranked pool at offset 0, sort it whole, then slice the page below.
@@ -711,8 +714,11 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
       // groupingField works on both entities/search and entities/hybrid_search (probe 6).
       const group = groupByBrand;
       const common = {
-        // Never `orderByParam` here: `orderByFields` is silently dropped by search and
-        // hybrid_search (probe 2), so the pool sort below owns every non-browse sort.
+        // `orderByParam` renders {} in search mode by design: search's own `orderByFields`
+        // sorts only the window it was handed, so it cannot paginate, and it is refused
+        // alongside a boost's functionScore (probe 2). The pool sort below owns every
+        // non-browse sort. Spread anyway, so a whole-set build needs no edit here.
+        ...orderByParam(sort, mode),
         ...groupParam(group),
         ...highlighterParam(highlight),
         limit: fetchLimit,
@@ -865,7 +871,7 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
         offset,
         pool: sorted ? fetchLimit : undefined,
         orderBy: nativeOrderBy ? orderByFor(sort) : undefined,
-        orderBySemantics: nativeOrderBy ? CAPS.orderBySemantics : undefined,
+        orderBySemantics: nativeOrderBy ? CAPS.orderByQuerySemantics : undefined,
         alpha: mode === "search" ? alpha : undefined,
         strategy,
         groupBy,

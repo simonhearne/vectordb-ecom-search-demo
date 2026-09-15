@@ -132,11 +132,15 @@ await probe(1, "synonyms: 'tablet' on text_syn_sparse returns iPad", [
 ], (r) => r.some((x) => /ipad/i.test(x.title)));
 
 // ── 2 order_by ────────────────────────────────────────────────────────────────
-// Candidate names x candidate value shapes. Only `entities/query` implements any of them.
+// Candidate names x candidate value shapes. The directional shapes come FIRST: where both
+// work, the richer one is the one worth recording, and on a build that only takes bare
+// names the directional spelling fails as an unknown field and falls through.
 const ORDER_CANDIDATES = [
-  ["orderByFields", ["price"]],
-  ["orderByFields", [{ field: "price", order: "asc" }]],
+  ["orderByFields", ["price:asc"]],
   ["orderByFields", ["price asc"]],
+  ["orderByFields", [{ field: "price", order: "asc" }]],
+  ["orderByFields", ["price"]],
+  ["order_by_fields", ["price:asc"]],
   ["order_by_fields", ["price"]],
   ["order_by_fields", [{ field: "price", order: "asc" }]],
   ["orderBy", ["price"]],
@@ -145,14 +149,11 @@ const ORDER_CANDIDATES = [
   ["sort_by", ["price"]],
 ];
 const orderVariants = (mk) => ORDER_CANDIDATES.map(([k, v]) => ({ label: `${k}=${JSON.stringify(v)}`, ...mk({ [k]: v }) }));
-const sortedAsc = (r) => r.length > 1 && r.every((x, i) => i === 0 || x.price >= r[i - 1].price);
+const sortedBy = (key, dir) => (r) =>
+  r.length > 1 && r.every((x, i) => i === 0 || (dir === "asc" ? x[key] >= r[i - 1][key] : x[key] <= r[i - 1][key]));
+const sortedAsc = sortedBy("price", "asc");
 
 const obQuery = await probe(2, "order_by on query (browse)", orderVariants(Q), sortedAsc);
-// A bogus field name is REJECTED where order_by is implemented, ACCEPTED where it is dropped.
-const obSearchReal = await rawCall("entities/search", S({ orderByFields: ["nosuchfield"] }).body);
-const obHybridReal = await rawCall("entities/hybrid_search", H({ orderByFields: ["nosuchfield"] }).body);
-push(2, "order_by on search", /does not exist/.test(obSearchReal.text) ? "PASS" : "FAIL", "orderByFields silently dropped");
-push(2, "order_by on hybrid_search", /does not exist/.test(obHybridReal.text) ? "PASS" : "FAIL", "orderByFields silently dropped");
 
 // Derive the parameter name AND the accepted value shape from whichever variant won, so a
 // future build that renames the parameter (or changes the value shape) does not make every
@@ -161,31 +162,70 @@ const obWinner = obQuery.ok
   ? ORDER_CANDIDATES.find(([k, v]) => `${k}=${JSON.stringify(v)}` === obQuery.variant)
   : null;
 const OB = obWinner ? obWinner[0] : null;
-/** Re-express a list of field names in the winning variant's value shape. */
-const obVal = (fields) => {
+/**
+ * Re-express a list of field names in the winning variant's value shape, at `dir`.
+ * Returns null when the winning shape carries no direction at all — the caller then knows
+ * descending is unexpressible rather than merely unsupported.
+ */
+const obVal = (fields, dir = "asc") => {
   const sample = obWinner[1][0];
-  if (sample && typeof sample === "object") return fields.map((f) => ({ ...sample, field: f }));
-  if (typeof sample === "string" && sample.includes(" ")) {
-    const suffix = sample.slice(sample.indexOf(" "));
-    return fields.map((f) => f + suffix);
+  if (sample && typeof sample === "object") return fields.map((f) => ({ ...sample, order: dir, field: f }));
+  if (typeof sample === "string" && /[: ]/.test(sample)) {
+    const sep = sample.includes(":") ? ":" : " ";
+    return fields.map((f) => `${f}${sep}${dir}`);
   }
-  return fields;
+  return dir === "asc" ? fields : null;
 };
+
 if (OB) {
   // Semantics: is the sorted page the top-`limit` window or the whole filtered set?
-  const mk = (limit) => Q({ [OB]: obVal(["price"]), limit }).body;
-  const wide = await call("entities/query", mk(200));
-  const narrow = await call("entities/query", mk(5));
-  const sameHead = ids(narrow.data) === ids(wide.data.slice(0, 5));
-  info(2, `order_by semantics: limit=5 head ${sameHead ? "==" : "!="} limit=200 head -> ${sameHead ? "whole-set sort" : "window sort"}`, OB);
-  // Descending?
-  let desc = null;
-  for (const [k, bad] of [["orderByType", 123], ["orderByDirection", 123], ["descending", { __p: 1 }], ["desc", { __p: 1 }], ["reverse", { __p: 1 }], ["sortOrder", 123]]) {
-    if (await inStruct("entities/query", Q({ [OB]: obVal(["price"]) }).body, k, bad)) { desc = k; break; }
-  }
-  push(2, "order_by descending", desc ? "PASS" : "FAIL", desc ?? "no direction field in struct (asc only)");
-  await probe(2, "order_by multi-field", [{ label: OB, ...Q({ [OB]: obVal(["average_rating", "price"]), outputFields: ["parent_asin", "price", "average_rating"] }) }],
+  const semantics = async (path, mk) => {
+    const wide = await call(path, mk(200));
+    const narrow = await call(path, mk(5));
+    return ids(narrow.data) === ids(wide.data.slice(0, 5)) ? "whole-set sort" : "window sort";
+  };
+  info(2, `order_by semantics on query: ${await semantics("entities/query", (limit) => Q({ [OB]: obVal(["price"]), limit }).body)}`, OB);
+
+  // Descending. Older builds had no direction field in the struct at all; the v3.0.1
+  // spelling carries it in the field string, so this is an observable-effect probe.
+  const descVal = obVal(["price"], "desc");
+  if (!descVal) push(2, "order_by descending", "FAIL", "winning value shape carries no direction");
+  else await probe(2, "order_by descending (query)", [{ label: `${OB}=${JSON.stringify(descVal)}`, ...Q({ [OB]: descVal }) }], sortedBy("price", "desc"));
+
+  await probe(2, "order_by multi-field (query)", [{ label: OB, ...Q({ [OB]: obVal(["average_rating", "price"]), outputFields: ["parent_asin", "price", "average_rating"] }) }],
     (r) => r.length > 1 && r.every((x, i) => i === 0 || x.average_rating >= r[i - 1].average_rating));
+  if (descVal) await probe(2, "order_by multi-field descending (query)", [
+    { label: OB, ...Q({ [OB]: obVal(["average_rating", "rating_number"], "desc"), outputFields: ["parent_asin", "average_rating", "rating_number"] }) },
+  ], sortedBy("average_rating", "desc"));
+
+  // Search / hybrid_search. A bogus field name is REJECTED where order_by is implemented
+  // and ACCEPTED where the field is not in the request struct — but a rejection only
+  // proves the parameter is *parsed*, so each is confirmed by an observable sort too.
+  const inSchema = async (path, mk) => /does not exist/.test((await rawCall(path, mk({ [OB]: obVal(["nosuchfield"]) }).body)).text);
+  const searchSorts = await probe(2, "order_by on search", [
+    { label: `${OB} asc`, ...SP({ [OB]: obVal(["price"]), limit: 20, outputFields: ["parent_asin", "price"] }) },
+  ], sortedAsc);
+  if (!searchSorts.ok) push(2, "order_by on search: parsed but not applied?", "INFO", `bogus field rejected: ${await inSchema("entities/search", SP)}`);
+  if (searchSorts.ok && descVal) await probe(2, "order_by descending (search)", [
+    { label: `${OB} desc`, ...SP({ [OB]: obVal(["price"], "desc"), limit: 20, outputFields: ["parent_asin", "price"] }) },
+  ], sortedBy("price", "desc"));
+  if (searchSorts.ok) {
+    // Window or whole-set? This decides whether the proxy can paginate with it at all.
+    info(2, `order_by semantics on search: ${await semantics("entities/search", (limit) => SP({ [OB]: obVal(["price"]), limit, outputFields: ["parent_asin", "price"] }).body)}`, OB);
+  }
+  await probe(2, "order_by on hybrid_search", [
+    { label: `${OB} asc`, ...H({ [OB]: obVal(["price"]), limit: 20, outputFields: ["parent_asin", "price"] }) },
+  ], sortedAsc);
+  push(2, "order_by on hybrid_search: in the request struct?", "INFO", `bogus field rejected: ${await inSchema("entities/hybrid_search", H)}`);
+
+  // order_by and a decay/boost FunctionScore are two different sort criteria — does this
+  // build let them coexist? (It decides whether a boosted search can also be sorted.)
+  const obFsErr = (await rawCall("entities/search", SP({
+    [OB]: obVal(["price"]), limit: 5,
+    functionScore: { functions: [{ name: "p", type: "Rerank", inputFieldNames: ["price"], params: { reranker: "decay", function: "gauss", origin: 0, scale: 5, offset: 0, decay: 0.5 } }] },
+  }).body)).text;
+  push(2, "order_by together with functionScore", /cannot be used together|conflicting/.test(obFsErr) ? "FAIL" : "PASS",
+    /cannot be used together|conflicting/.test(obFsErr) ? "refused: conflicting sort criteria" : "accepted");
 }
 
 // ── 3 aggregation (entities/query with aggregate expressions in outputFields) ──
@@ -201,14 +241,120 @@ await probe(3, "aggregate count(*) together with min/max", [
 await probe(3, "aggregate under a TEXT_MATCH filter", [
   { label: "text_match", ...A({ filter: 'TEXT_MATCH(text_snippet, "wireless earbuds")', outputFields: ["count(*)"] }) },
 ], (r) => r.length === 1 && r[0]["count(*)"] > 0);
-// GROUP BY: every candidate name is silently dropped (a wrong-typed value is accepted too).
+// GROUP BY on the query path. Added to REST v2 in milvus #52071 / #52118 (3.0.1); on
+// builds without it every candidate name is silently dropped.
 const groupNames = ["groupByFields", "group_by_fields", "groupBy", "group_by", "groupByField", "group_by_field"];
 let groupName = null;
 for (const g of groupNames) if (await inStruct("entities/query", A({ outputFields: ["count(*)"] }).body, g, "BOGUS")) { groupName = g; break; }
-await probe(3, "aggregate count(*) grouped by main_category", groupNames.map((g) => ({
+const grouped = await probe(3, "aggregate count(*) grouped by main_category", groupNames.map((g) => ({
   label: g, ...A({ [g]: ["main_category"], outputFields: ["main_category", "count(*)"] }),
-})), (r) => r.length > 1 && r[0]["count(*)"] != null);
+})), (r) => r.length > 1 && r[0]["count(*)"] != null && typeof r[0].main_category === "string");
 push(3, "group-by field in the query request struct", groupName ? "PASS" : "FAIL", groupName ?? "not in struct");
+
+const GB = grouped.ok ? grouped.variant : null;
+if (GB) {
+  // Unlike the global case, count(*) CAN share a grouped call with min/max — which is
+  // what lets /api/facets take a dimension's counts and its price bounds together.
+  await probe(3, "grouped count(*) together with min/max", [
+    { label: GB, ...A({ [GB]: ["main_category"], outputFields: ["main_category", "count(*)", "min(price)", "max(price)"] }) },
+  ], (r) => r.length > 1 && r[0]["count(*)"] != null && r[0]["min(price)"] != null);
+  await probe(3, "group-by two fields", [
+    { label: GB, ...A({ [GB]: ["main_category", "store"], outputFields: ["main_category", "store", "count(*)"] }) },
+  ], (r) => r.length > 1 && typeof r[0].store === "string" && r[0]["count(*)"] != null);
+  await probe(3, "group-by under a TEXT_MATCH filter", [
+    { label: GB, ...A({ filter: 'TEXT_MATCH(text_snippet, "wireless earbuds")', [GB]: ["main_category"], outputFields: ["main_category", "count(*)"] }) },
+  ], (r) => r.length > 1 && r[0]["count(*)"] > 0);
+  // ARRAY<VARCHAR> keys — this is what decides whether category counts can be native.
+  await probe(3, "group-by an ARRAY<VARCHAR> field (categories)", [
+    { label: GB, ...A({ [GB]: ["categories"], outputFields: ["categories", "count(*)"] }) },
+  ], (r) => r.length > 1);
+  // ORDER BY an aggregate would give "top N brands by count" in one call.
+  if (OB) await probe(3, "ORDER BY count(*) on a grouped query", [
+    { label: `${GB}+${OB}`, ...A({ [GB]: ["store"], [OB]: obVal(["count(*)"], "desc") ?? ["count(*)"], outputFields: ["store", "count(*)"], limit: 10 }) },
+  ], (r) => r.length > 1 && r.every((x, i) => i === 0 || x["count(*)"] <= r[i - 1]["count(*)"]));
+
+  // Are grouped counts exact when the limit TRUNCATES the bucket list? Two shapes:
+  // ORDER BY over the whole group key (what /api/facets sends) vs. over a prefix of it.
+  // The prefix shape cuts per shard before the proxy merges, so buckets can come back
+  // silently partial (milvus#52067 item 2). Compared against an independent count(*),
+  // and against the same query with nothing truncated — a count that CHANGES with the
+  // limit is the bug; agreeing with the direct count at every limit is the safe shape.
+  if (OB) {
+    const one = async (body) => (await call("entities/query", A(body).body)).data;
+    const direct = async (f) => (await one({ filter: f, outputFields: ["count(*)"] }))[0]["count(*)"];
+    const cat = "All Electronics";
+    // Full-key: GROUP BY store, ORDER BY store.
+    const fullAt = async (limit) => (await one({ filter: `main_category == "${cat}"`, [GB]: ["store"], [OB]: obVal(["store"]), outputFields: ["store", "count(*)"], limit }))[0];
+    const [fSmall, fBig] = [await fullAt(5), await fullAt(16384)];
+    const fReal = await direct(`main_category == "${cat}" and store == "${fSmall.store}"`);
+    push(3, "grouped counts exact when truncated — ORDER BY the whole group key",
+      fSmall["count(*)"] === fReal && fSmall["count(*)"] === fBig["count(*)"] ? "PASS" : "FAIL",
+      `limit 5 -> ${fSmall["count(*)"]}, limit 16384 -> ${fBig["count(*)"]}, direct -> ${fReal}`);
+    // Prefix: GROUP BY (main_category, store), ORDER BY main_category only.
+    const preAt = async (limit) => (await one({ filter: `main_category == "${cat}"`, [GB]: ["main_category", "store"], [OB]: obVal(["main_category"]), outputFields: ["main_category", "store", "count(*)"], limit }))[0];
+    const [pSmall, pBig] = [await preAt(5), await preAt(16384)];
+    const pReal = await direct(`main_category == "${cat}" and store == "${pSmall.store}"`);
+    push(3, "grouped counts exact when truncated — ORDER BY a PREFIX of the group key",
+      pSmall["count(*)"] === pReal ? "PASS" : "FAIL",
+      `limit 5 -> ${pSmall["count(*)"]}, limit 16384 -> ${pBig["count(*)"]}, direct -> ${pReal}`,
+      pSmall["count(*)"] === pReal ? "-" : "partial aggregates (milvus#52067)");
+  }
+
+  // Bucket window + paging. A high-cardinality key (store) overflows one window, so the
+  // proxy needs a key-paging story: does an ordered group-by page by `key > last`?
+  const bucketPage = async (extra = {}) => (await call("entities/query", A({
+    filter: "price > 0", [GB]: ["store"], outputFields: ["store", "count(*)"], limit: 16384,
+    ...(OB ? { [OB]: obVal(["store"]) } : {}), ...extra,
+  }).body)).data;
+  const page1 = await bucketPage();
+  const sum = (rows) => rows.reduce((a, b) => a + b["count(*)"], 0);
+  if (page1.length === 16384 && OB) {
+    const last = page1[page1.length - 1].store;
+    const page2 = await bucketPage({ filter: `price > 0 and store > "${last.replace(/"/g, '\\"')}"` });
+    const total = (await call("entities/query", A({ filter: "price > 0", outputFields: ["count(*)"] }).body)).data[0]["count(*)"];
+    push(3, "group-by key-paging (store > last)", sum(page1) + sum(page2) === total ? "PASS" : "FAIL",
+      `${page1.length}+${page2.length} buckets`, `counts sum to ${sum(page1) + sum(page2)} of ${total}`);
+  } else {
+    info(3, `group-by on store fits one window: ${page1.length} buckets summing ${sum(page1)}`, GB);
+  }
+}
+
+// ── 3b search-side bucket aggregation (`searchAggregation`) ───────────────────
+// A second, richer aggregation surface that rides on entities/search: buckets with
+// per-bucket metrics, nested sub-aggregations and `topHits` document snapshots. Present
+// since v3.0.0. The decisive question for faceting is what `count` counts — see below.
+const aggSpec = (extra = {}) => ({
+  fields: ["main_category"], size: 5,
+  metrics: { n: { op: "count", fieldName: "*" } },
+  order: [{ key: "_count", direction: "desc" }],
+  ...extra,
+});
+const buckets = (out) => out?.data?.[0]?.buckets ?? [];
+const sa = await probe("3b", "searchAggregation on search", [
+  { label: "searchAggregation", path: "entities/search", body: { collectionName: COLLECTION, data: ["wireless earbuds"], annsField: "text_sparse", limit: 1, searchAggregation: aggSpec() } },
+], (_r, out) => buckets(out).length > 1 && typeof buckets(out)[0].count === "number");
+if (sa.ok) {
+  // Does `count` cover every matching row (a facet count) or only the documents pulled
+  // into the bucket (a top-groups retrieval)? Vary topHits.size and watch count follow.
+  const countsAt = async (topHitsSize) => {
+    const out = await call("entities/search", {
+      collectionName: COLLECTION, data: ["wireless earbuds"], annsField: "text_sparse", limit: 1,
+      searchAggregation: aggSpec({ searchSize: 500, topHits: { size: topHitsSize } }),
+    });
+    return buckets(out).map((b) => b.count);
+  };
+  const [c1, c20] = [await countsAt(1), await countsAt(20)];
+  const tracksTopHits = c1.every((n) => n === 1) && c20.every((n) => n === 20);
+  push("3b", "searchAggregation count = facet count over the whole match set", tracksTopHits ? "FAIL" : "PASS",
+    tracksTopHits ? "count tracks topHits.size (top-groups retrieval, not a facet count)" : "count independent of topHits.size",
+    `topHits 1 -> ${c1.join()}, topHits 20 -> ${c20.join()}`);
+  await probe("3b", "searchAggregation on ARRAY<VARCHAR> (categories)", [
+    { label: "fields:[categories]", path: "entities/search", body: { collectionName: COLLECTION, data: ["wireless earbuds"], annsField: "text_sparse", limit: 1, searchAggregation: aggSpec({ fields: ["categories"], metrics: {}, order: [] }) } },
+  ], (_r, out) => buckets(out).length > 1);
+}
+const saHybrid = await rawCall("entities/hybrid_search", H({ searchAggregation: aggSpec() }).body);
+push("3b", "searchAggregation on hybrid_search", /not supported for hybrid search/.test(saHybrid.text) ? "FAIL" : "PASS",
+  /not supported for hybrid search/.test(saHybrid.text) ? "explicitly refused" : "accepted");
 
 // ── 4 highlighter ─────────────────────────────────────────────────────────────
 const hlCamel = { type: "lexical", fields: ["text_snippet"], highlightSearchText: true, preTags: ["\u0001"], postTags: ["\u0002"], fragmentSize: 160, numOfFragments: 1 };

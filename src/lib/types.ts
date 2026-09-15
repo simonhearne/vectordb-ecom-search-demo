@@ -128,7 +128,8 @@ export interface FacetsResponse {
   // brand filter, category counts ignore the category filter, so alternatives stay visible.
   brands: FacetBucket[];
   categories: FacetBucket[];
-  // false when a set exceeded the row cap and counts come from the first `sampled` rows.
+  // Brand counts are a native GROUP BY and always exact. `exact` is false when the
+  // *category* counts ran out of row budget and come from the first `sampled` rows.
   exact: boolean;
   sampled: number;
   debug: { filter: string; pymilvusQuery: string; zillizMs: number };

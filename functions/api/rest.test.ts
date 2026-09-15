@@ -4,6 +4,8 @@
 import { describe, it, expect } from "vitest";
 import {
   decayParam,
+  facetGroupByParam,
+  facetOrderByParam,
   groupParam,
   highlighterParam,
   nativeOrderByFields,
@@ -15,17 +17,23 @@ import {
 const NOW = new Date("2026-09-03T15:42:00Z");
 
 describe("nativeOrderByFields", () => {
-  it("pushes price_asc down on browse (entities/query — the only orderByFields route)", () => {
+  it("pushes price_asc down on browse (entities/query, a whole-set sort)", () => {
     expect(nativeOrderByFields("price_asc", "browse")).toEqual(["price"]);
   });
-  it("cannot push price_asc down on search (orderByFields dropped by entities/search)", () => {
+  it("pushes price_desc down on browse (v3.0.1 carries the direction in the field string)", () => {
+    expect(nativeOrderByFields("price_desc", "browse")).toEqual(["price:desc"]);
+  });
+  it("pushes a multi-field descending sort down on browse", () => {
+    expect(nativeOrderByFields("rating", "browse")).toEqual(["average_rating:desc", "rating_number:desc"]);
+  });
+  it("cannot push price_asc down on search — entities/search sorts only the window it was given", () => {
     expect(nativeOrderByFields("price_asc", "search")).toBeUndefined();
+  });
+  it("cannot push price_asc down on similar (orderByFields dropped by hybrid_search)", () => {
+    expect(nativeOrderByFields("price_asc", "similar")).toBeUndefined();
   });
   it("cannot push newest down on browse (TIMESTAMPTZ is not sortable)", () => {
     expect(nativeOrderByFields("newest", "browse")).toBeUndefined();
-  });
-  it("cannot push price_desc down on browse (ascending only)", () => {
-    expect(nativeOrderByFields("price_desc", "browse")).toBeUndefined();
   });
 });
 
@@ -35,6 +43,21 @@ describe("orderByParam", () => {
   });
   it("is empty when not pushable", () => {
     expect(orderByParam("price_asc", "search")).toEqual({});
+  });
+});
+
+describe("facet aggregation params", () => {
+  it("carries the group-by fragment /api/facets counts brands with", () => {
+    expect(facetGroupByParam("store")).toEqual({ groupByFields: ["store"] });
+  });
+  it("takes one field, so a group key wider than the order key is unexpressible", () => {
+    // A prefix ORDER BY yields silently partial counts once the limit truncates the
+    // bucket list (CAPS.aggregationPrefixOrderExact / milvus#52067). The builder pairs
+    // with facetOrderByParam on the same single field, so the unsafe shape cannot be built.
+    expect(Object.values(facetGroupByParam("store"))[0]).toHaveLength(1);
+  });
+  it("orders bucket keys ascending, so the proxy can page by `key > last`", () => {
+    expect(facetOrderByParam("store")).toEqual({ orderByFields: ["store"] });
   });
 });
 

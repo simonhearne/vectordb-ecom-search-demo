@@ -62,9 +62,10 @@ flowchart TB
   and populates the filter rail. See [Query understanding](#query-understanding).
 - **Filters** compile to a Milvus boolean expression (price, rating, reviews, brand,
   category) with user strings safely escaped.
-- **Sort**: Relevance is native vector order; Price / Rating / Reviews re-rank the
-  retrieved window client-side (standard vector-first approximation — it reorders the
-  top-K, not the whole catalog).
+- **Sort**: Relevance is native vector order. In **browse**, Price / Rating / Reviews push
+  down to Milvus as a native `orderByFields` over the whole filtered set. In **search** they
+  re-rank the retrieved window client-side (standard vector-first approximation — it reorders
+  the top-K, not the whole catalog), as does *Newest* everywhere.
 
 ## Prerequisites
 
@@ -175,19 +176,26 @@ wish list.
 | **One per brand** toggle | `groupingField:"store", groupSize:1` | Grouped search |
 | **Boost**: cheaper / better rated / popular | `functionScore` decay reranker (`type:"Rerank"`, gauss/exp) — enabled only at the slider extremes | Decay rerank |
 | Live "N in catalogue matching your search" + price bounds | `entities/query` scalar aggregation (`count(*)`, `min`/`max(price)`) | Aggregations |
-| Counts beside every brand and category | `entities/query` for `store`/`categories` of the matching rows (PK-paged, ≤2×16,384), tallied in the proxy — no GROUP BY over REST | Aggregations |
-| Sort → *Price: low to high* (browse only) | native `orderByFields` on `entities/query` | `order_by_fields` |
+| Counts beside every brand | native GROUP BY — `groupByFields:["store"]` + `count(*)` on `entities/query`, bucket-paged by `store > last`; exact over the whole match set | Aggregations |
+| Counts in the category dropdown | `entities/query` for the matching rows' `categories` (PK-paged, ≤2×16,384), tallied in the proxy — GROUP BY rejects ARRAY keys | Aggregations |
+| Sort → *Price* (both ways), *Rating*, *Reviews* (browse only) | native `orderByFields` on `entities/query`, e.g. `["price:desc"]` — a whole-set sort, so it paginates natively | `order_by_fields` |
 | Diagnostics → Vector index | `indexes/describe` → `indexType` (`IVF_RABITQ`) | RaBitQ |
 | Empty-state "Try:" chips | dense retrieval + synonym analyzer absorbing a misspelling — no fuzziness claim | Typo gap |
 
 **Not on this cluster's REST v2** (so not in the app): result highlighting — cards show the
-plain snippet, never a marked-up one; native GROUP BY aggregation (not exposed on
-`entities/query` — per-brand/category counts are computed in the proxy instead: it fetches the
-matching rows' `store`/`categories` columns PK-ordered in up to two 16,384-row pages and tallies
-them, exact up to 32,768 rows, labelled approximate beyond); a
-token-preview (`run_analyzer` 404s over REST); decay boosting on `first_seen`; and any sort
-other than *browse + Price: low to high* pushed server-side — every other sort keeps this
-app's original over-fetch-and-sort (`POOL_SIZE`) approach.
+plain snippet, never a marked-up one; GROUP BY on an ARRAY<VARCHAR> key, so category counts
+stay in the proxy (PK-ordered, up to two 16,384-row pages, labelled approximate past 32,768
+rows — brand counts are exact); `ORDER BY count(*)`, so the proxy ranks the buckets itself;
+a token-preview (`run_analyzer` 404s over REST); decay boosting or sorting on `first_seen`;
+and `order_by` on `entities/hybrid_search` or alongside a boost's `functionScore`. Search-mode
+sorts keep this app's original over-fetch-and-sort (`POOL_SIZE`) approach: `entities/search`
+does take `orderByFields`, but it reorders only the window it was handed, so it cannot
+paginate.
+
+`entities/search` also offers a **`searchAggregation`** bucket spec (per-bucket metrics,
+nested sub-aggregations, `topHits` snapshots). It is deliberately unused: bucket `count`
+tracks `topHits.size` rather than the match set, making it a top-groups retrieval rather than
+a facet counter.
 
 ### Loading the data
 

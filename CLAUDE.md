@@ -108,6 +108,12 @@ the diff focused).
   `functions/api/rest.ts` (`REST_NAMES`/`CAPS` — "change here, nowhere else") and is produced by
   `npm run probe:v3`, not repeated here. See "Milvus 3.0 features" below for what it means for
   the app.
+- ⚠️ **The cluster gets upgraded under us — re-run `npm run probe:v3` before trusting `CAPS`.**
+  Between 2026-09-03 and 2026-09-15 it moved to a v3.0.1-class build, which turned three
+  `false`s true: query-path GROUP BY, search-side `orderByFields`, and descending `order_by`
+  (milvus-io/milvus#52071 → #52118, cherry-picked to the 3.0 branch 2026-08-03, released in
+  v3.0.1 on 2026-09-09). A stale `false` costs a feature silently — nothing fails, the app
+  just keeps its fallback. There is no version endpoint over REST v2; the probe is the test.
 
 ## Layout
 - `functions/api/search.ts` — proxy: `POST /api/search` (search when `q` — tunable hybrid
@@ -123,15 +129,18 @@ the diff focused).
   didn't actually carry.
 - `functions/api/facets.ts` — proxy: `POST /api/facets`, scoped to the current filters (+
   `TEXT_MATCH` once a query is committed). `count(*)` and `min/max(price)` are scalar
-  aggregations (two `entities/query` calls — they can't share one). **Per-brand / per-category
-  counts** are computed in the proxy: GROUP BY doesn't exist over REST v2 here, so it fetches
-  the matching rows' `store` + `categories` (PK-ordered, `limit 16384`, paged by
-  `parent_asin > last`, max 2 pages) and counts them with `src/lib/facetCounts.ts`. Standard
-  faceting: brand counts ignore the brand filter, category counts ignore the category filter
-  (one fetch when neither is set, two in parallel otherwise). Returns `{ total, priceMin,
-  priceMax, brands, categories, exact, sampled }`; `exact: false` means the set exceeded
-  32,768 rows and counts come from the first `sampled` rows (bare browse). `public/facets.json`
-  is only the pre-response fallback list.
+  aggregations (two `entities/query` calls — a *global* `count(*)` can't share one).
+  **Per-brand counts** are a native GROUP BY (`groupByFields:["store"]` + `count(*)` in
+  `outputFields`) — exact over the whole matching set, paged by `store > last` under an
+  ascending `orderByFields` because `store` has ~24k distinct values and one window holds
+  16,384 buckets. **Per-category counts** are still tallied in the proxy
+  (`src/lib/facetCounts.ts`): `categories` is ARRAY<VARCHAR> and group-by rejects ARRAY keys,
+  so the matching rows' `categories` are fetched PK-ordered, max 2 pages of 16,384. Both
+  halves share `pageByKey()`. Standard faceting: brand counts ignore the brand filter,
+  category counts ignore the category filter. Returns `{ total, priceMin, priceMax, brands,
+  categories, exact, sampled }`; `exact: false` means only the **category** counts were
+  truncated past 32,768 rows — brand counts are never approximate. `public/facets.json` is
+  only the pre-response fallback list.
 - `src/lib/filter.ts` — `compileFilter()` (shared by `search.ts` and `facets.ts`,
   unit-tested): price/rating/reviews/brand/category, plus `PHRASE_MATCH`, the `first_seen`
   date cutoff (`dateCutoffIso`, floored to UTC midnight so the cache key stays stable within a
@@ -147,7 +156,7 @@ the diff focused).
 - `src/components/DiagnosticsPanel.tsx` — collapsible panel beneath the results showing the
   query, compiled filter, window, latency (client round-trip + server understand/embed/
   zilliz), and raw results JSON — plus (this branch) server-side sort / group-by / ranker /
-  sparse field / vector index rows and a "Facet aggregation" section (the two
+  sparse field / vector index rows and a "Facet aggregation" section (the four
   `client.query(...)` calls behind `/api/facets`). No tokens row (`run_analyzer` is
   unavailable over REST v2 here).
 - `src/components/InterpretationNote.tsx` — shows how a NL query was interpreted (cleaned
@@ -260,29 +269,51 @@ hopes":
   mirrors this rule client-side. There is no "boost newest": decay rejects `first_seen`
   (TIMESTAMPTZ isn't a numeric decay input).
 - **Live catalogue count, price bounds and per-brand/category counts** (`/api/facets`) —
-  `count(*)` and `min(price)`/`max(price)` are scalar aggregation calls (they can't be combined
-  in one); brand/category counts are **fetch-and-count in the proxy** (GROUP BY isn't exposed
-  by REST v2 on this cluster): the matching rows' `store`/`categories` columns are pulled
-  PK-ordered in up to two 16,384-row pages and tallied. Scoped to the current filters plus
-  `TEXT_MATCH(text_snippet, q)` once a query is committed. Rail shows "N in catalogue matching
-  your search", live price-slider bounds, a count beside every brand, and counts in the
-  category dropdown; sets past 32,768 rows are labelled "counts approximate".
-- **Sort** — native `orderByFields` exists only on `entities/query` (browse), ascending only,
-  over the whole filtered set — used for browse and **Price: low to high** only. Every other
-  sort (price: high to low, rating, reviews, newest, and every sort in search/similar mode)
-  keeps the existing `POOL_SIZE` over-fetch → sort → slice path.
+  `count(*)` and `min(price)`/`max(price)` are scalar aggregation calls (a global `count(*)`
+  can't be combined with others; a *grouped* one can). **Brand counts are a native GROUP BY**
+  (`groupByFields` on `entities/query`, added to REST v2 in milvus#52118 and released in
+  v3.0.1) — exact over the whole matching set, bucket-paged by `store > last`. **Category
+  counts stay fetch-and-count in the proxy**: group-by rejects ARRAY<VARCHAR> keys. Scoped to
+  the current filters plus `TEXT_MATCH(text_snippet, q)` once a query is committed. Rail shows
+  "N in catalogue matching your search", live price-slider bounds, a count beside every brand,
+  and counts in the category dropdown; only the category counts can be labelled approximate.
+  There is no ORDER BY on an aggregate yet, so the proxy ranks the buckets itself.
+  ⚠️ The bucket `order_by` is not just for paging: a grouped query whose ORDER BY covers only
+  a **prefix** of the group key returns silently **partial** counts as soon as the limit
+  truncates the bucket list (the per-shard cut lands before the proxy merges contributions —
+  milvus-io/milvus#52067 item 2, reproduced live: GROUP BY (main_category, store) ORDER BY
+  main_category gives a head bucket of 7 at limit 5, 10 at limit 50, and the true 13 only
+  untruncated). `facetGroupByParam` therefore takes a *single* field and is paired with
+  `facetOrderByParam` on that same field, so the unsafe shape cannot be built.
+- **Sort** — native `orderByFields` (`"field"` / `"field:asc"` / `"field:desc"`) works on
+  `entities/query` and `entities/search`, but only the **query** path sorts the whole filtered
+  set; on search it reorders just the window it was handed, so it cannot paginate and is
+  refused alongside a boost's `functionScore`. So **every browse sort except "newest" pushes
+  down** (price both ways, rating, reviews — all whole-set, natively paginated); "newest" and
+  every sort in search/similar mode keep the `POOL_SIZE` over-fetch → sort → slice path.
+  `entities/hybrid_search` has no `orderByFields` in its request struct at all.
 - **Vector index** — `indexes/describe` reports the live index type (`IVF_RABITQ`), shown in
   diagnostics.
 
 **Not available over REST v2 on this cluster** (so not in the app): result highlighting (no
 highlighter field on `entities/search`/`hybrid_search` — cards show the plain `text_snippet`;
 `HL_OPEN`/`HL_CLOSE` sentinels are defined in `rest.ts` as a documented no-op for if a future
-build gains one), GROUP BY aggregation (per-brand/category counts are computed in the proxy
-instead), `run_analyzer` (no token
-preview in diagnostics), decay reranking on TIMESTAMPTZ, and descending or search-side
-`order_by`.
+build gains one), GROUP BY on an ARRAY<VARCHAR> key (so category counts stay in the proxy),
+`ORDER BY count(*)` on a grouped query, `order_by` on `entities/hybrid_search` or alongside a
+`functionScore`, `run_analyzer` (no token preview in diagnostics), decay reranking or
+`order_by` on TIMESTAMPTZ, and a whole-set `order_by` on `entities/search`.
+
+Also present but deliberately unused: **`searchAggregation`** on `entities/search` (buckets
+with per-bucket metrics, nested sub-aggregations and `topHits` snapshots, since v3.0.0). Its
+bucket `count` tracks `topHits.size` rather than the whole match set, so it is a top-groups
+retrieval, not a facet counter — `/api/facets` uses the query-path GROUP BY instead. It is
+also refused on `hybrid_search`. Upstream tracking for the remaining gaps:
+milvus-io/milvus#50924 (range/histogram buckets, `count_distinct`, aggregation with hybrid
+search, HAVING) and #50925 (ORDER BY aggregate, sort after hybrid/rerank) — both open, no
+target release.
 
 Diagnostics panel additions on this branch: **Sort (server)** — native fields, or `pool N ·
 client-side`; **Group by**; **Ranker** (`WeightedRanker(...)` / `RRFRanker(60)` /
 `FunctionScore(...)`); **Sparse field**; **Vector index**; plus a **Facet aggregation** section
-showing the two `client.query(...)` calls behind `/api/facets`. No tokens row.
+showing the four `client.query(...)` calls behind `/api/facets` — count, price bounds, the
+brand GROUP BY and the category row fetch. No tokens row.

@@ -69,8 +69,10 @@ export function FilterPanel({
         <p className="mb-3 text-xs text-faint">
           {countFmt.format(live.total)} in catalogue matching your search
           {!live.exact && (
-            <span title={`Brand and category counts come from the first ${countFmt.format(live.sampled)} matching products`}>
-              {" "}· counts approximate
+            // Brand counts are a native GROUP BY and always exact; only the category
+            // counts, which the proxy tallies from fetched rows, can be truncated.
+            <span title={`Category counts come from the first ${countFmt.format(live.sampled)} matching products. Brand counts are exact.`}>
+              {" "}· category counts approximate
             </span>
           )}
         </p>
