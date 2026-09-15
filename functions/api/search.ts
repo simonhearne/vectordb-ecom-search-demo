@@ -574,6 +574,13 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
 
     const t0 = Date.now();
 
+    // Kicked off here, awaited only when the debug block is assembled. It is a diagnostics
+    // row with no bearing on the search, and it depends on nothing above — awaiting it at
+    // the end cost a serial round-trip (~40ms warm, ~180ms on a cold isolate) on every
+    // first request per isolate. It is memoized and swallows its own errors, so the
+    // floating promise can neither reject nor be fetched twice.
+    const indexTypeP = vectorIndexType(env);
+
     // Strip filter phrases out of the query before embedding; surface the implied
     // filters back to the UI. Never let understanding failure break the search.
     // A "quoted phrase" becomes an exact-phrase filter — deterministically, before the LLM
@@ -877,7 +884,7 @@ async function runSearch(env: Env, body: SearchRequest): Promise<Response> {
         groupBy,
         ranker,
         sparseField: mode === "search" ? sparseFieldUsed : undefined,
-        indexType: await vectorIndexType(env),
+        indexType: await indexTypeP,
         pymilvusQuery,
         count: results.length,
         timings: { understandMs, embedMs, seedMs, zillizMs, serverMs: Date.now() - t0 },
