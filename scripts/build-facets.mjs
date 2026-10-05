@@ -1,7 +1,8 @@
 /**
- * Build-time facet artifact. Samples the collection and computes top-N brands, the
- * category list, and price bounds, then writes public/facets.json. Approximate
- * (sample-based) — re-run when the collection changes:  npm run build:facets
+ * Build-time facet artifact. Samples `amazon_reviews_v3` on the Milvus 3.0 cluster and
+ * computes top-N brands, the category list, and price bounds, then writes
+ * public/facets.json. Approximate (sample-based) — re-run when the collection changes:
+ * npm run build:facets
  *
  * Reads ZILLIZ_ENDPOINT / ZILLIZ_TOKEN from the environment, falling back to .dev.vars.
  */
@@ -12,7 +13,7 @@ import { dirname, join } from "node:path";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
 
-const COLLECTION = "amazon_reviews";
+const COLLECTION = "amazon_reviews_v3";
 const SAMPLE_SIZE = 10000; // rows to sample (paged; serverless window limit is 16384)
 const PAGE = 1000;
 const TOP_BRANDS = 40;

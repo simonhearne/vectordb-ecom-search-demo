@@ -1,4 +1,4 @@
-import type { SortKey } from "./types";
+import type { Boost, Fusion, SortKey } from "./types";
 
 export const PAGE_SIZE = 24;
 
@@ -21,6 +21,7 @@ export const SORT_OPTIONS: { key: SortKey; label: string }[] = [
   { key: "price_desc", label: "Price: high to low" },
   { key: "rating", label: "Avg. customer rating" },
   { key: "reviews", label: "Most reviewed" },
+  { key: "newest", label: "Newest" },
 ];
 
 export const RATING_OPTIONS = [4, 3, 2, 1];
@@ -31,3 +32,27 @@ export const REVIEW_OPTIONS: { value: number; label: string }[] = [
   { value: 100, label: "100+" },
   { value: 1000, label: "1,000+" },
 ];
+
+export const FUSION_OPTIONS: { key: Fusion; label: string }[] = [
+  { key: "weighted", label: "Weighted" },
+  { key: "rrf", label: "RRF" },
+];
+
+// NB: no "newest" entry here — TIMESTAMPTZ (first_seen) cannot be a decay reranker input.
+// The Boost type still carries the "newest" literal for other uses; the UI list omits it.
+export const BOOST_OPTIONS: { key: Boost | ""; label: string }[] = [
+  { key: "", label: "No boost" },
+  { key: "cheaper", label: "Boost cheaper" },
+  { key: "rated", label: "Boost better rated" },
+  { key: "popular", label: "Boost popular" },
+];
+
+export const LISTED_OPTIONS: { value: number; label: string }[] = [
+  { value: 0, label: "Any time" },
+  { value: 30, label: "30 days" },
+  { value: 90, label: "90 days" },
+  { value: 365, label: "1 year" },
+];
+
+export const NEAR_KM_OPTIONS = [250, 1000, 5000];
+export const NEW_BADGE_DAYS = 30;

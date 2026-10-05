@@ -11,10 +11,12 @@ export function BlendSlider({
   alpha,
   onChange,
   className = "",
+  disabled = false,
 }: {
   alpha: number;
   onChange: (a: number) => void;
   className?: string;
+  disabled?: boolean;
 }) {
   const [local, setLocal] = useState(alpha);
   const [dragging, setDragging] = useState(false);
@@ -34,7 +36,7 @@ export function BlendSlider({
       <div className="flex items-center justify-between">
         <span className="eyebrow">Relevance blend</span>
         <span className="text-xs font-medium tabular-nums text-muted">
-          {Math.round(local * 100)}% semantic
+          {disabled ? "rank fusion" : `${Math.round(local * 100)}% semantic`}
         </span>
       </div>
       <input
@@ -43,6 +45,7 @@ export function BlendSlider({
         max={1}
         step={0.05}
         value={local}
+        disabled={disabled}
         onChange={(e) => setLocal(Number(e.target.value))}
         onPointerDown={() => setDragging(true)}
         onPointerUp={commit}
@@ -50,7 +53,7 @@ export function BlendSlider({
         onBlur={commit}
         aria-label="Relevance blend: keyword to semantic"
         aria-valuetext={`${Math.round(local * 100)} percent semantic`}
-        className="w-full cursor-pointer"
+        className={`w-full ${disabled ? "cursor-not-allowed opacity-40" : "cursor-pointer"}`}
       />
       <div className="flex items-center justify-between text-[11px] font-medium text-faint">
         <span>Keyword</span>

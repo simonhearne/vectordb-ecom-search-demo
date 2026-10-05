@@ -13,6 +13,7 @@ function chips(parsed: ParsedQuery): string[] {
   else if (f.priceMin != null) out.push(`over ${money(f.priceMin)}`);
   if (f.minRating != null) out.push(`★ ${f.minRating}+`);
   if (f.minReviews != null) out.push(`${new Intl.NumberFormat("en-US").format(f.minReviews)}+ reviews`);
+  if (f.phrase) out.push(`exact phrase “${f.phrase}”`);
   return out;
 }
 

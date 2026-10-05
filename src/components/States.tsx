@@ -37,6 +37,32 @@ export function EmptyState({ query }: { query: string }) {
   );
 }
 
+export const EXAMPLE_QUERIES = [
+  '"noise cancelling" headphones',
+  "tablet under $200",
+  "laptp charjer",
+  "usb-c hub 4 stars",
+  "bluetooth speaker with 1000 reviews",
+];
+
+export function TryQueries({ onPick }: { onPick: (q: string) => void }) {
+  return (
+    <div className="mb-5 flex flex-wrap items-center gap-2 text-sm">
+      <span className="text-faint">Try:</span>
+      {EXAMPLE_QUERIES.map((q) => (
+        <button
+          key={q}
+          type="button"
+          onClick={() => onPick(q)}
+          className="rounded-full border border-line bg-surface px-3 py-1 text-xs font-medium text-muted transition-colors hover:border-accent hover:text-accent"
+        >
+          {q}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export function ErrorState({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
     <div className="flex flex-col items-center justify-center rounded-[var(--radius-card)] border border-line bg-surface px-6 py-20 text-center">

@@ -8,7 +8,10 @@
     "dev:vite": "vite",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
     "build:facets": "node scripts/build-facets.mjs",
+    "load:v3": ".venv/bin/python scripts/load_v3.py",
+    "probe:v3": "node scripts/probe-v3.mjs",
     "preview": "npm run build && wrangler pages dev dist",
     "deploy": "npm run build && wrangler pages deploy dist",
     "deploy:prod": "npm run build && wrangler pages deploy dist --branch main"
@@ -26,6 +29,7 @@
     "tailwindcss": "^4.0.0",
     "typescript": "^5.7.0",
     "vite": "^6.0.0",
+    "vitest": "^3.2.7",
     "wrangler": "^4.0.0"
   }
 }

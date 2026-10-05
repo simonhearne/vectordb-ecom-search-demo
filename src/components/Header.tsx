@@ -124,6 +124,8 @@ export function Header({
   alpha,
   onAlpha,
   showBlend,
+  blendDisabled,
+  controls,
 }: {
   query: string;
   onQuery: (v: string) => void;
@@ -136,6 +138,8 @@ export function Header({
   alpha: number;
   onAlpha: (a: number) => void;
   showBlend: boolean;
+  blendDisabled?: boolean;
+  controls?: React.ReactNode;
 }) {
   return (
     <header className="sticky top-0 z-30 border-b border-line bg-paper/85 backdrop-blur-md">
@@ -154,11 +158,6 @@ export function Header({
           <div className="hidden flex-1 md:flex">
             <SearchBar value={query} onChange={onQuery} onSubmit={onSubmit} onClear={onClear} />
           </div>
-          {showBlend && (
-            <div className="hidden w-44 md:block">
-              <BlendSlider alpha={alpha} onChange={onAlpha} />
-            </div>
-          )}
           <div className="hidden md:block">
             <SortSelect sort={sort} onSort={onSort} />
           </div>
@@ -178,6 +177,13 @@ export function Header({
         <div className="mt-3 md:hidden">
           <SearchBar value={query} onChange={onQuery} onSubmit={onSubmit} onClear={onClear} />
         </div>
+
+        {showBlend && (
+          <div className="mt-2 hidden items-center gap-4 md:flex">
+            <div className="w-44"><BlendSlider alpha={alpha} onChange={onAlpha} disabled={blendDisabled} /></div>
+            {controls}
+          </div>
+        )}
       </div>
     </header>
   );
